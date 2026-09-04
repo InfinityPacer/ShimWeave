@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+  workflow_dispatch:
+
+concurrency:
+  group: shimweave-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up pnpm and Node.js
+        uses: pnpm/setup@v2.1.0
+        with:
+          runtime: node@22
+          cache: true
+          require-lockfile: true
+
+      - name: Validate release version
+        id: release
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION must use X.Y.Z format" >&2
+            exit 1
+          fi
+
+          for source in package.json apps/chrome-extension/package.json apps/chrome-extension/public/manifest.json; do
+            source_version="$(node -p "require('./${source}').version")"
+            if [ "${source_version}" != "${version}" ]; then
+              echo "${source} version ${source_version} does not match VERSION ${version}" >&2
+              exit 1
+            fi
+          done
+
+          version_pattern="${version//./\\.}"
+          if ! grep -Eq "^## \[${version_pattern}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "CHANGELOG.md has no dated ${version} release section" >&2
+            exit 1
+          fi
+
+          {
+            echo "version=${version}"
+            echo "tag=v${version}"
+            echo "target=$(git rev-parse HEAD)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build workspaces
+        run: pnpm build
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Check types
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build release package
+        run: node scripts/package-extension.mjs
+
+      - name: Extract release notes
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          awk -v version="${VERSION}" '
+            index($0, "## [" version "] - ") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md release section for ${VERSION} is empty" >&2
+            exit 1
+          fi
+
+      - name: Create release tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET: ${{ steps.release.outputs.target }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --force --tags origin
+
+          existing=""
+          if git rev-parse -q --verify "${TAG}^{commit}" >/dev/null; then
+            existing="$(git rev-list -n 1 "${TAG}")"
+          fi
+
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            git tag -f -a "${TAG}" "${TARGET}" -m "ShimWeave ${TAG#v}"
+            git push --force origin "refs/tags/${TAG}"
+          elif [ -z "${existing}" ]; then
+            git tag -a "${TAG}" "${TARGET}" -m "ShimWeave ${TAG#v}"
+            git push origin "refs/tags/${TAG}"
+          elif [ "${existing}" != "${TARGET}" ]; then
+            echo "${TAG} points to another commit; bump VERSION or rerun this workflow manually" >&2
+            exit 1
+          fi
+
+          remote_target="$(git ls-remote origin "refs/tags/${TAG}^{}" | awk '{print $1}')"
+          if [ "${remote_target}" != "${TARGET}" ]; then
+            echo "Remote ${TAG} does not point to the release commit" >&2
+            exit 1
+          fi
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET: ${{ steps.release.outputs.target }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --tag "${TAG}" --target "${TARGET}" --latest \
+              --title "ShimWeave ${VERSION}" --notes-file release-notes.md
+          else
+            gh release create "${TAG}" --verify-tag --target "${TARGET}" --latest \
+              --title "ShimWeave ${VERSION}" --notes-file release-notes.md
+          fi
+
+          gh release upload "${TAG}" \
+            "artifacts/shimweave-${VERSION}.zip" \
+            "artifacts/shimweave-${VERSION}.zip.sha256" \
+            --clobber
+
+      - name: Summarize release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          TARGET: ${{ steps.release.outputs.target }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          {
+            echo "### ShimWeave ${VERSION}"
+            echo "- Tag: ${TAG}"
+            echo "- Commit: ${TARGET}"
+            echo "- Package: shimweave-${VERSION}.zip"
+            echo "- Checksum: shimweave-${VERSION}.zip.sha256"
+          } >> "${GITHUB_STEP_SUMMARY}"

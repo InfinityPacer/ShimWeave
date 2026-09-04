@@ -1,0 +1,18 @@
+{
+  "name": "@shimweave/chrome-extension",
+  "version": "0.0.1",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/build-extension.mjs",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@shimweave/adapter-plex": "workspace:*",
+    "@shimweave/contracts": "workspace:*",
+    "@shimweave/core": "workspace:*",
+    "@shimweave/engine-mediabunny": "workspace:*",
+    "@shimweave/io-fetch": "workspace:*"
+  }
+}

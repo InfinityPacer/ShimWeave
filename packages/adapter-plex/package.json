@@ -1,0 +1,17 @@
+{
+  "name": "@shimweave/adapter-plex",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@shimweave/contracts": "workspace:*",
+    "@shimweave/core": "workspace:*"
+  }
+}

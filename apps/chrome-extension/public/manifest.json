@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "ShimWeave",
+  "version": "0.0.1",
+  "minimum_chrome_version": "120",
+  "description": "在浏览器本地为 Plex 等网页播放器补齐媒体格式兼容能力。",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "permissions": ["declarativeNetRequestWithHostAccess", "storage", "webNavigation", "webRequest"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/web/*", "https://*/web/*"],
+      "js": ["plex-native-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://*/web/*", "https://*/web/*"],
+      "js": ["plex-content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "ShimWeave",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "worker-frame.html",
+        "worker-frame.js",
+        "media-worker.js",
+        "range-coordinator.js",
+        "chunks/*.js"
+      ],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
+}
