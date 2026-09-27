@@ -57,7 +57,8 @@ export const plexControlSessionRule: SiteAdapterSessionRuleSpec = {
       ],
     },
     condition: {
-      regexFilter: '^https?://[^/]+/video/:/transcode/universal/start\\.mpd(?:\\?|$)',
+      // decision 上的声明只让服务端知道浏览器装有扩展（例如据此提示安装），接管仍只在 start.mpd。
+      regexFilter: '^https?://[^/]+/video/:/transcode/universal/(?:start\\.mpd|decision)(?:\\?|$)',
       resourceTypes: [
         'xmlhttprequest' as chrome.declarativeNetRequest.ResourceType,
         'media' as chrome.declarativeNetRequest.ResourceType,

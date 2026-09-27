@@ -343,7 +343,9 @@ Plex 私有 webpack/Shaka 接入只允许存在于 `adapter-plex`。Hook 通过�
 `plex-native-main.ts` 只负责实例化这些组件并连接 `window.postMessage` 生命周期，不包含 Plex
 模块识别、播放裁决或错误策略。后续站点使用各自独立入口，不能通过修改 Plex Hook 接入。
 
-在可选 `control-v1` 路径中，扩展以版本化请求头声明能力。Gateway 仅在已有 Direct Play Grant、
+在可选 `control-v1` 路径中，扩展以版本化请求头声明能力，声明同时出现在 universal `decision` 与
+`start.mpd` 上。`decision` 上的声明只表示浏览器装有扩展，服务端可据此决定是否提示安装，不构成接管，
+不改变决策语义。Gateway 仅在已有 Direct Play Grant、
 准确 Media/Part 和当前 Plex 授权都成立时返回控制描述。描述包含稳定内容身份、固定同源控制路径
 及独立 bearer；bearer 只进入控制请求头。Gateway 每次通过上游解析服务获取临时 URL 后仍只返回
 控制描述，媒体字节保持 CDN 直达浏览器。
