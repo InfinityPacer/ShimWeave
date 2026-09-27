@@ -108,6 +108,12 @@ describe('Chrome extension manifest', () => {
         'https://plex.example:20600/video/:/transcode/universal/start.mpd?path=%2Flibrary',
       ),
     ).toBe(true);
+    expect(
+      filter.test(
+        'https://plex.example:20600/video/:/transcode/universal/decision?path=%2Flibrary',
+      ),
+    ).toBe(true);
+    expect(filter.test('https://plex.example/video/:/transcode/universal/start.m3u8')).toBe(false);
     expect(filter.test('https://plex.example/library/parts/1/file')).toBe(false);
   });
 
