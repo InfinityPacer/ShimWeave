@@ -141,15 +141,15 @@ const namedError = (name: string): Error => Object.assign(new Error('internal de
 describe('字幕不可用提示', () => {
   it('按原因给出不含轨道编号的说明', () => {
     expect(formatSubtitleUnavailable('unsupported_codec', 'pgs')).toBe(
-      '字幕不可用：暂不支持 PGS 图形字幕',
+      '字幕没有显示，暂不支持 PGS 图形字幕',
     );
     expect(formatSubtitleUnavailable('unsupported_codec', 'kate')).toBe(
-      '字幕不可用：暂不支持这种字幕格式',
+      '字幕没有显示，暂不支持这种字幕格式',
     );
-    expect(formatSubtitleUnavailable('external', 'srt')).toBe('字幕不可用：暂不支持外挂字幕');
+    expect(formatSubtitleUnavailable('external', 'srt')).toBe('字幕没有显示，暂不支持外挂字幕');
     expect(formatSubtitleUnavailable('mismatch')).toBe(
-      '字幕不可用：无法确认所选字幕对应文件里的哪一条',
+      '字幕没有显示，无法确认所选字幕对应文件里的哪一条',
     );
-    expect(formatSubtitleUnavailable('read_failed')).toBe('字幕不可用：读取字幕失败');
+    expect(formatSubtitleUnavailable('read_failed')).toBe('字幕没有显示，读取字幕失败');
   });
 });
