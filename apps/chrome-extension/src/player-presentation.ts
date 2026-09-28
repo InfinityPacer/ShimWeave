@@ -150,6 +150,13 @@ const displayLanguage = (code: string | undefined, locale: string): string | und
   }
 };
 
+/**
+ * 接管就绪后播放中断的提示。Plex 此时不会弹出错误框，提示沿用失败说明并附上稳定错误码，
+ * 便于反馈时对应原因；不含地址、文件名或内部异常。
+ */
+export const formatPlaybackInterrupted = (failure: PlaybackFailurePresentation): string =>
+  `ShimWeave 播放已中断，${failure.message.replace(/[。.]$/, '')}（${failure.code}）`;
+
 /** 字幕不可用提示只说明原因类别，不暴露轨道编号或文件信息。 */
 export const formatSubtitleUnavailable = (
   reason: SubtitleUnavailableReason,
