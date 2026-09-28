@@ -11,9 +11,28 @@ export interface PlexAudioSelection {
   language?: string;
 }
 
+/**
+ * Plex 为当前用户记住的字幕选择。内嵌字幕带容器流索引，ordinal 是它在 Part 全部内嵌字幕中
+ * 按容器顺序的位置；外挂字幕没有索引，只记为 external。
+ */
+export interface PlexSubtitleSelection {
+  ordinal?: number;
+  external?: boolean;
+  codec?: string;
+  language?: string;
+}
+
 export interface PlexStreamSelection {
   audio?: PlexAudioSelection;
+  /** 缺失表示没有选字幕，播放时字幕保持关闭。 */
+  subtitle?: PlexSubtitleSelection;
 }
+
+/** Plex 字幕选择对应到媒体引擎的结果；unavailable 表示选了字幕但不能确定是哪一条。 */
+export type PlexSubtitleResolution =
+  | { status: 'off' }
+  | { status: 'track'; trackId: string }
+  | { status: 'unavailable'; reason: 'mismatch' | 'external'; codec?: string };
 
 export interface PlexMetadataRequest {
   url: string;
@@ -43,17 +62,37 @@ export const parsePlexStreamSelection = (
   const audios = streams
     .filter((stream) => stream.streamType === 2 && Number.isSafeInteger(stream.index))
     .sort((left, right) => Number(left.index) - Number(right.index));
-  const ordinal = audios.findIndex((stream) => stream.selected === true || stream.selected === 1);
+  const ordinal = audios.findIndex(isSelected);
   const selected = audios[ordinal];
-  if (!selected) return {};
-  const codec = nonEmptyString(selected.codec);
-  const language = nonEmptyString(selected.languageTag) ?? nonEmptyString(selected.languageCode);
+  const subtitle = parseSubtitleSelection(streams);
   return {
-    audio: {
-      ordinal,
-      ...(codec ? { codec: codec.toLowerCase() } : {}),
-      ...(language ? { language } : {}),
-    },
+    ...(selected ? { audio: { ordinal, ...streamFacts(selected) } } : {}),
+    ...(subtitle ? { subtitle } : {}),
+  };
+};
+
+const parseSubtitleSelection = (
+  streams: readonly Record<string, unknown>[],
+): PlexSubtitleSelection | undefined => {
+  const subtitles = streams.filter((stream) => stream.streamType === 3);
+  const selected = subtitles.find(isSelected);
+  if (!selected) return undefined;
+  if (!Number.isSafeInteger(selected.index)) return { external: true, ...streamFacts(selected) };
+  const embedded = subtitles
+    .filter((stream) => Number.isSafeInteger(stream.index))
+    .sort((left, right) => Number(left.index) - Number(right.index));
+  return { ordinal: embedded.indexOf(selected), ...streamFacts(selected) };
+};
+
+const isSelected = (stream: Record<string, unknown>): boolean =>
+  stream.selected === true || stream.selected === 1;
+
+const streamFacts = (stream: Record<string, unknown>): { codec?: string; language?: string } => {
+  const codec = nonEmptyString(stream.codec);
+  const language = nonEmptyString(stream.languageTag) ?? nonEmptyString(stream.languageCode);
+  return {
+    ...(codec ? { codec: codec.toLowerCase() } : {}),
+    ...(language ? { language } : {}),
   };
 };
 
@@ -70,6 +109,40 @@ export const resolvePlexAudioTrack = (
   if (!track) return undefined;
   if (selection.codec && !sameAudioCodec(selection.codec, track.codec)) return undefined;
   return track.id;
+};
+
+/**
+ * 把 Plex 的字幕选择对应到媒体引擎列出的字幕轨：按内嵌字幕的位置定位，再核对编码。
+ * 越界或编码不一致说明两边的轨道列表不同，返回 unavailable 让宿主提示，而不是显示另一条字幕。
+ */
+export const resolvePlexSubtitleTrack = (
+  tracks: readonly MediaTrack[],
+  selection: PlexSubtitleSelection | undefined,
+): PlexSubtitleResolution => {
+  if (!selection) return { status: 'off' };
+  const codec = selection.codec ? { codec: selection.codec } : {};
+  if (selection.external || selection.ordinal === undefined) {
+    return { status: 'unavailable', reason: 'external', ...codec };
+  }
+  const track = tracks.filter((candidate) => candidate.kind === 'subtitle')[selection.ordinal];
+  if (!track || (selection.codec && !sameSubtitleCodec(selection.codec, track.codec))) {
+    return { status: 'unavailable', reason: 'mismatch', ...codec };
+  }
+  return { status: 'track', trackId: track.id };
+};
+
+const PLEX_SUBTITLE_CODEC_FAMILIES: Readonly<Record<string, string>> = {
+  subrip: 'srt',
+  vtt: 'webvtt',
+  hdmv_pgs_subtitle: 'pgs',
+  dvd_subtitle: 'vobsub',
+  dvbsub: 'dvb_subtitle',
+};
+
+const sameSubtitleCodec = (plexCodec: string, trackCodec: string): boolean => {
+  const family = (codec: string) =>
+    PLEX_SUBTITLE_CODEC_FAMILIES[codec.toLowerCase()] ?? codec.toLowerCase();
+  return family(plexCodec) === family(trackCodec);
 };
 
 /** Plex 与媒体引擎对同一编码的命名不同，这里只归一已知的差异。 */
