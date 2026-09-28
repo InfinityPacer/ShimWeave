@@ -16,6 +16,7 @@ import {
   Mp4OutputFormat,
   Output,
 } from 'mediabunny';
+import { isTrueHdTrack, type PreparedTrueHdAudio, prepareTrueHdAudio } from './truehd-audio.js';
 
 const MAX_TRACK_LEAD_SECONDS = 1;
 
@@ -26,6 +27,12 @@ export const startMediaFragmentStream = async (
 ): Promise<MediaFragmentStream> => {
   validateOptions(options);
   if ((options.startSeconds ?? 0) > 0) return startSeekRemux(input, sink, options);
+  // Conversion 无法解码 TrueHD，从头播放也走手动分片路径。
+  if (options.outputAudio) {
+    const audioTrack = await selectAudioTrack(input, options.audioTrackId);
+    if (audioTrack && (await isTrueHdTrack(audioTrack)))
+      return startSeekRemux(input, sink, options);
+  }
   return startConversion(input, sink, options);
 };
 
@@ -135,7 +142,19 @@ const startSeekRemux = async (
     });
   }
   let audioConversion: Conversion | undefined;
-  if (audioTrack && options.outputAudio) {
+  let trueHd: PreparedTrueHdAudio | undefined;
+  if (audioTrack && options.outputAudio && (await isTrueHdTrack(audioTrack))) {
+    trueHd = await prepareTrueHdAudio(audioTrack, timelineOffsetSeconds, options.outputAudio);
+    if (trueHd) {
+      const languageCode = normalizeOutputLanguageCode(trueHd.languageCode);
+      output.addAudioTrack(trueHd.source, {
+        ...(languageCode ? { languageCode } : {}),
+        disposition: trueHd.disposition,
+      });
+    } else {
+      trackBarrier.closeTrack('audio');
+    }
+  } else if (audioTrack && options.outputAudio) {
     try {
       audioConversion = await createSeekAudioConversion(
         input,
@@ -190,6 +209,15 @@ const startSeekRemux = async (
           ),
         );
       }
+      if (trueHd) {
+        pumps.push(
+          trueHd
+            .pump(timelineOffsetSeconds, lifetime.signal, (timestamp) =>
+              trackBarrier.advance('audio', timestamp),
+            )
+            .finally(() => trackBarrier.closeTrack('audio')),
+        );
+      }
       if (audioConversion) {
         pumps.push(
           audioConversion.execute().finally(() => {
@@ -207,6 +235,7 @@ const startSeekRemux = async (
       await cancelOutput().catch(() => undefined);
       throw error;
     } finally {
+      trueHd?.close();
       trackBarrier.dispose();
     }
   })();
@@ -227,6 +256,7 @@ const startSeekRemux = async (
   } catch (error) {
     lifetime.abort(error);
     await Promise.allSettled([cancelAudioConversion(), cancelOutput(), completion]);
+    trueHd?.close();
     throw error;
   }
 };

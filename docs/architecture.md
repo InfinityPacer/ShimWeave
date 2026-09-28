@@ -137,7 +137,8 @@ Cluster。其他容器缺少直接帧率字段时，使用 Mediabunny 以 256 �
 Atmos/JOC、DTS:X 或精确声道布局；这些字段保持未知，不能由单个 HDR 布尔值推导。识别出
 Dolby Vision 配置只说明媒体事实已知，不代表浏览器或转封装输出已经正确呈现 Dolby Vision。
 
-AC3、EAC3 或 DTS 只有在原音轨的 MSE 候选被当前能力证据否决后才进入 AAC 降级。规划器、
+AC3、EAC3、DTS 或 TrueHD 只有在原音轨的 MSE 候选被当前能力证据否决后才进入 AAC 降级（TrueHD
+没有参数串，浏览器也不支持，直接进入降级）。规划器、
 能力键、Worker 协议和媒体引擎共享同一确定输出：AAC-LC、2.0、48 kHz、192 kbps。Player
 展示转换后的实际输出配置，不把输入多声道音轨误报为输出能力；该降级会丢失对象音频和环绕
 声道，因此不能替代原音轨直放。
@@ -209,6 +210,14 @@ AC3、DTS 和 AAC codec 构建为扩展包内独立 chunk。Worker 只有在规�
 输入音轨加载 AC3/EAC3 或 DTS decoder，并在浏览器没有原生 AAC encoder 时加载 AAC encoder；
 普通 AAC、原生播放和纯转封装不会加载这些包。
 
+TrueHD 不在 Mediabunny 的编码列表里，轨道 codec 为 null，它自己的解码与 Conversion 都会丢弃这条
+轨道。`@shimweave/codec-truehd` 把 FFmpeg 9.0.2 的 `truehd` 解码器编译为约 240 KB 的 WASM（gzip 约
+110 KB），内联在独立 chunk 里，只在选中 TrueHD 且需要转换时加载。引擎按 Matroska CodecID
+`A_TRUEHD` 识别这条轨道，此时从头播放也走手动分片路径：`EncodedPacketSink` 从目标位置前的
+major sync 读包，解码器直接取流内的双声道呈现子流，再由 `AudioSampleSource` 编码为与计划一致
+的 AAC。MKV 包时间戳按毫秒取整，所以只用第一段保留音频定锚，之后按解码帧数推进，视频关键帧
+之前的访问单元丢弃。Atmos 的空间对象子流不解码。
+
 浏览器媒体运行时使用单会话播放状态机执行规划结果。媒体描述、规划、Worker 建流和输出挂载
 共享同一代次；新播放会先撤销旧代次，迟到描述、分片或样本不能覆盖当前媒体。规划选择的
 音视频轨道 ID 必须传到媒体引擎，不能在转封装时重新回退到容器主轨。首帧、连续播放与 Seek
@@ -237,7 +246,7 @@ Plex 选轨由后台用播放会话凭据读取 `/library/metadata/{id}`，取�
 失败或超时（3 秒）同样按未指定处理，不阻断起播。调用方明确指定的轨道 ID 不存在时仍必须拒绝
 执行，不能回退默认轨。
 
-选中音轨存在但没有可执行路径（例如 TrueHD），或它的候选都被确定性证据否决时，按
+选中音轨存在但没有可执行路径（例如浏览器不支持、也没有转换器的编码），或它的候选都被确定性证据否决时，按
 `audioFallback` 处理。`strict` 直接判定不支持；`compatible`（扩展默认，用户可在扩展选项里改成
 不替换）按同语言优先、容器默认轨其次、声道多者优先的顺序尝试其他音轨，计划里用
 `audioSubstitution` 记录原本选中的音轨，Plex 宿主在规划完成时于画面上方提示一次改用了哪一条。
@@ -258,7 +267,7 @@ cue 统一使用原媒体绝对时间，Seek 或快速切换时按播放代次�
 - HEVC、AV1 和 HDR 取决于 Chrome、操作系统、GPU 与具体 codec configuration。
 - Dolby Vision 必须按真实 Profile 和平台验证，不能因为 HEVC 可解码就宣称支持。
 - AC3/EAC3/DTS 转 AAC 会丢失 Atmos 或 DTS:X 对象信息。
-- TrueHD、PGS、VobSub、ASS/SSA、蓝光菜单、DRM/EME 不列入首版承诺。
+- PGS、VobSub、ASS/SSA、蓝光菜单、DRM/EME 不列入首版承诺。TrueHD 已按上文降级为 AAC 立体声。
 - 字幕采用独立输入与渲染接口，外挂 WebVTT/SRT 优先；内嵌字幕要等输入引擎具备可靠 cue
   读取能力后再接入，字幕失败不终止已经建立的视频会话。
 - 浏览器无法处理的视频返回明确限制，不把流量回退到 Gateway 或 NAS。

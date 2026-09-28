@@ -11,6 +11,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "@shimweave/codec-truehd": "workspace:*",
     "@shimweave/contracts": "workspace:*",
     "@mediabunny/aac-encoder": "1.55.5",
     "@mediabunny/ac3": "1.55.5",

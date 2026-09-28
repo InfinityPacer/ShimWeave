@@ -103,6 +103,7 @@ async function collectPackageFiles(root) {
 function isPackageFile(path) {
   if (packageFiles.has(path)) return true;
   if (/^chunks\/[^/]+\.js$/.test(path)) return true;
+  if (path === 'licenses/FFmpeg.md' || path === 'licenses/COPYING.LGPLv2.1') return true;
   return /^icons\/[^/]+\.(png|svg)$/.test(path);
 }
 
