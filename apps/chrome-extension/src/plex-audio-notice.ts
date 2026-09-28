@@ -28,7 +28,7 @@ export class PlexAudioNotice {
   }
 
   /** 同一位置只保留最新一条提示；文本走 textContent，不解析为 HTML。 */
-  showText(text: string, kind: 'audio' | 'subtitle'): void {
+  showText(text: string, kind: 'audio' | 'subtitle' | 'playback', visibleMs = VISIBLE_MS): void {
     this.dispose();
     const element = this.document.createElement('div');
     element.setAttribute('role', 'status');
@@ -56,7 +56,7 @@ export class PlexAudioNotice {
     this.timer = setTimeout(() => {
       element.style.opacity = '0';
       this.timer = setTimeout(() => this.dispose(), 300);
-    }, VISIBLE_MS);
+    }, visibleMs);
   }
 
   dispose(): void {

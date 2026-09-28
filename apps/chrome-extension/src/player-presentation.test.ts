@@ -4,6 +4,7 @@ import {
   expectedPlexErrorCode,
   formatAudioTrackLabel,
   formatMediaFormats,
+  formatPlaybackInterrupted,
   formatSubtitleUnavailable,
   presentPlaybackFailure,
   presentPlexError,
@@ -151,5 +152,14 @@ describe('字幕不可用提示', () => {
       '字幕没有显示，无法确认所选字幕对应文件里的哪一条',
     );
     expect(formatSubtitleUnavailable('read_failed')).toBe('字幕没有显示，读取字幕失败');
+  });
+
+  it('播放中断提示沿用失败说明并附上错误码', () => {
+    expect(
+      formatPlaybackInterrupted({
+        code: 'media_read_failed',
+        message: '媒体源暂时不可用，请稍后重试。',
+      }),
+    ).toBe('ShimWeave 播放已中断，媒体源暂时不可用，请稍后重试（media_read_failed）');
   });
 });

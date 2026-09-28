@@ -6,6 +6,7 @@ import {
 } from '@shimweave/adapter-plex';
 import type { MediaDescriptor, PlaybackPlan } from '@shimweave/contracts';
 import { describe, expect, it, vi } from 'vitest';
+import { MediaWorkerRemoteError } from './media-worker-client.js';
 import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
 import {
   BrowserMediaElementError,
@@ -680,7 +681,129 @@ describe('PlexNativePlaybackHost', () => {
     });
     await host.dispose();
   });
+  it('接管就绪后播放中断时提示用户，并在 video 上记下结束原因', async () => {
+    const media = new TestMediaElement();
+    const completion = deferred<void>();
+    const interruptions: string[] = [];
+    const posted: PlexNativeMessage[] = [];
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({
+        start: async () =>
+          activePlayback(
+            vi.fn(async () => undefined),
+            completion.promise,
+          ),
+        stop: vi.fn(async () => undefined),
+      }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: (message) => posted.push(message),
+      readStartSeconds: () => undefined,
+      presentInterruption: (failure) => interruptions.push(failure.code),
+      createNoticeId: () => 'notice_id_1234567890',
+    });
+    media.dataset.shimweaveSessionEnd = 'stopped';
+    claim(host, 'native_session_1234567890');
+    await flush();
+    expect(media.dataset.shimweaveSessionEnd).toBeUndefined();
+    expect(posted.at(-1)?.type).toBe('takeover-ready');
+
+    completion.reject(new MediaWorkerRemoteError('stream_failed', 'RangeProtocolError'));
+    await flush();
+
+    expect(interruptions).toEqual(['media_read_failed']);
+    expect(media.dataset.shimweaveSessionEnd).toBe('media_read_failed');
+    expect(media.dataset.shimweaveSessionEndDetail).toBe(
+      'MediaWorkerRemoteError stream_failed RangeProtocolError',
+    );
+    expect(posted.at(-1)).toMatchObject({ type: 'takeover-error', code: 'media_read_failed' });
+    await host.dispose();
+  });
+
+  it('就绪前失败交给 Plex 错误框，不重复提示中断', async () => {
+    const media = new TestMediaElement();
+    const interruptions: string[] = [];
+    const failures: string[] = [];
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({
+        start: async () => {
+          throw new BrowserMediaElementError(3);
+        },
+        stop: vi.fn(async () => undefined),
+      }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: vi.fn(),
+      readStartSeconds: () => undefined,
+      presentFailure: (failure) => failures.push(failure.code),
+      presentInterruption: (failure) => interruptions.push(failure.code),
+      createNoticeId: () => 'notice_id_1234567890',
+    });
+    claim(host, 'native_session_1234567890');
+    await flush();
+
+    expect(failures).toEqual(['media_decode_error']);
+    expect(interruptions).toEqual([]);
+    expect(media.dataset.shimweaveSessionEnd).toBe('media_decode_error');
+    expect(media.dataset.shimweaveSessionEndDetail).toBe('BrowserMediaElementError 3');
+    await host.dispose();
+  });
+
+  it('Hook 停止与正常播完分别记为 stopped 与 ended', async () => {
+    const media = new TestMediaElement();
+    const completions = [deferred<void>(), deferred<void>()];
+    let starts = 0;
+    const posted: PlexNativeMessage[] = [];
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({
+        start: async () =>
+          activePlayback(
+            vi.fn(async () => undefined),
+            requireValue(completions[starts++]).promise,
+          ),
+        stop: vi.fn(async () => undefined),
+      }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: (message) => posted.push(message),
+      readStartSeconds: () => undefined,
+      createNoticeId: () => 'notice_id_1234567890',
+    });
+    claim(host, 'native_session_1234567890');
+    await flush();
+    requireValue(completions[0]).resolve();
+    await flush();
+    expect(media.dataset.shimweaveSessionEnd).toBe('ended');
+
+    host.acceptPageMessage({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-stop',
+      sessionId: 'native_session_1234567890',
+    });
+    await flush();
+    expect(media.dataset.shimweaveSessionEnd).toBe('stopped');
+    expect(media.dataset.shimweaveSessionEndDetail).toBeUndefined();
+    expect(posted.at(-1)?.type).toBe('takeover-stopped');
+    await host.dispose();
+  });
 });
+
+const claim = (host: PlexNativePlaybackHost, sessionId: string): void => {
+  const notice = redirect('request-1', 'playback-1', 'source-1');
+  host.acceptRuntimeMessage(started('request-1', 'playback-1', 'source-1'));
+  host.acceptRuntimeMessage(notice);
+  host.acceptPageMessage({
+    protocol: PLEX_NATIVE_PROTOCOL,
+    sender: 'main-hook',
+    type: 'takeover-start',
+    requestKey: notice.requestKey,
+    noticeId: 'notice_id_1234567890',
+    sessionId,
+  });
+};
+
+const requireValue = <T>(value: T | undefined): T => {
+  if (value === undefined) throw new Error('missing test value');
+  return value;
+};
 
 const started = (
   requestId: string,

@@ -12,7 +12,7 @@ import {
 import { BrowserCapabilityRuntime, createBrowserCapabilityScope } from './capability-runtime.js';
 import { readSettings } from './extension-settings.js';
 import { BrowserPlaybackRuntime } from './playback-runtime.js';
-import { formatSubtitleUnavailable } from './player-presentation.js';
+import { formatPlaybackInterrupted, formatSubtitleUnavailable } from './player-presentation.js';
 import { PlexAudioNotice } from './plex-audio-notice.js';
 import { PlexErrorPresenter } from './plex-error-presenter.js';
 import { PlexNativePlaybackHost } from './plex-native-host.js';
@@ -28,6 +28,9 @@ import {
   SITE_ADAPTER_ACTIVATE_MESSAGE,
   type SiteAdapterActivateResponse,
 } from './site-adapter-protocol.js';
+
+/** 中断提示比音轨、字幕提示停留更久，播放已经停下，用户需要时间读完。 */
+const INTERRUPTION_VISIBLE_MS = 15_000;
 
 interface ActivePlexRuntime {
   dispose(): Promise<void>;
@@ -50,6 +53,7 @@ function startPlexRuntime(): ActivePlexRuntime {
   const errorPresenter = new PlexErrorPresenter({ document });
   const audioNotice = new PlexAudioNotice(document);
   const subtitleNotice = new PlexAudioNotice(document, { top: '124px' });
+  const interruptionNotice = new PlexAudioNotice(document);
   const postPageMessage = (message: PlexNativeMessage): void =>
     window.postMessage(message, location.origin);
   const host = new PlexNativePlaybackHost({
@@ -83,6 +87,12 @@ function startPlexRuntime(): ActivePlexRuntime {
     presentAudioSubstitution: (requested, playing) => audioNotice.show(requested, playing),
     presentSubtitleUnavailable: (reason, codec) =>
       subtitleNotice.showText(formatSubtitleUnavailable(reason, codec), 'subtitle'),
+    presentInterruption: (failure) =>
+      interruptionNotice.showText(
+        formatPlaybackInterrupted(failure),
+        'playback',
+        INTERRUPTION_VISIBLE_MS,
+      ),
   });
 
   const onRuntimeMessage = (message: unknown): false => {
@@ -139,6 +149,7 @@ function startPlexRuntime(): ActivePlexRuntime {
       errorPresenter.dispose();
       audioNotice.dispose();
       subtitleNotice.dispose();
+      interruptionNotice.dispose();
       await host.dispose();
       capabilityRuntime?.close();
     },
