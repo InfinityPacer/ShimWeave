@@ -328,6 +328,88 @@ describe('PlexNativeHookController', () => {
     hook.dispose();
   });
 
+  it('两个 Shaka load 并发接管同一 Part 时先停止前一个会话，前一个 load 正常结束', async () => {
+    const fixture = createRuntime(async () => Promise.reject(new Error('load interrupted')));
+    const posted: PlexNativeMessage[] = [];
+    const hook = new PlexNativeHookController({
+      postMessage: (message) => posted.push(message),
+      rejectionGraceMs: 60_000,
+    });
+    hook.install(fixture.runtime);
+    const restored = new (fixture.runtime.Player as unknown as new () => typeof fixture.player)();
+    const secondUrl = startUrl.replace('playback-1', 'playback-2');
+    const firstLoading = fixture.player.load(startUrl);
+    const secondLoading = restored.load(secondUrl);
+    await flush();
+
+    hook.accept(sourceAvailable());
+    await flush();
+    const first = posted.find((message) => message.type === 'takeover-start');
+    if (first?.type !== 'takeover-start') throw new Error('first takeover was not started');
+
+    hook.accept({
+      ...sourceAvailable(),
+      requestKey: requestKey.replace('playback-1', 'playback-2'),
+      noticeId: 'notice_id_0987654321',
+    });
+    await flush();
+    const stop = posted.find((message) => message.type === 'takeover-stop');
+    expect(stop).toMatchObject({ sessionId: first.sessionId });
+    expect(posted.filter((message) => message.type === 'takeover-start')).toHaveLength(1);
+
+    hook.accept({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'extension-host',
+      type: 'takeover-stopped',
+      sessionId: first.sessionId,
+    });
+    await expect(firstLoading).resolves.toBeUndefined();
+    await flush();
+    const second = posted.filter((message) => message.type === 'takeover-start')[1];
+    if (second?.type !== 'takeover-start') throw new Error('second takeover was not started');
+    expect(second.noticeId).toBe('notice_id_0987654321');
+    hook.accept({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'extension-host',
+      type: 'takeover-ready',
+      sessionId: second.sessionId,
+    });
+    await expect(secondLoading).resolves.toBeUndefined();
+    hook.dispose();
+  });
+
+  it('接管准备期间同一请求的新通知不被拒绝，沿用旧通知接管', async () => {
+    const fixture = createRuntime(async () => Promise.reject(new Error('load interrupted')));
+    const unload = deferredVoid();
+    const posted: PlexNativeMessage[] = [];
+    const hook = new PlexNativeHookController({
+      postMessage: (message) => posted.push(message),
+      rejectionGraceMs: 60_000,
+    });
+    hook.install(fixture.runtime);
+    vi.mocked(fixture.player.unload).mockImplementationOnce(() => unload.promise);
+    const loading = fixture.player.load(startUrl);
+    await flush();
+    hook.accept(sourceAvailable());
+    await flush();
+    hook.accept({ ...sourceAvailable(), noticeId: 'notice_id_0987654321' });
+    unload.resolve();
+    await flush();
+
+    expect(posted.filter((message) => message.type === 'source-rejected')).toEqual([]);
+    const takeover = posted.find((message) => message.type === 'takeover-start');
+    expect(takeover).toMatchObject({ noticeId: 'notice_id_1234567890' });
+    if (takeover?.type !== 'takeover-start') throw new Error('takeover was not started');
+    hook.accept({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'extension-host',
+      type: 'takeover-ready',
+      sessionId: takeover.sessionId,
+    });
+    await expect(loading).resolves.toBeUndefined();
+    hook.dispose();
+  });
+
   it('停止开始后忽略迟到的 Host ready', async () => {
     const manifestError = new Error('manifest rejected');
     const fixture = createRuntime(async () => Promise.reject(manifestError));
@@ -594,4 +676,12 @@ const sourceAvailable = (): Extract<PlexNativeMessage, { type: 'source-available
 const flush = async (): Promise<void> => {
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+const deferredVoid = () => {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
 };

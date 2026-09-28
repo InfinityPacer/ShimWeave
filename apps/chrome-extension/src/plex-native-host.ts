@@ -65,6 +65,11 @@ interface NativePlaybackSession {
 
 interface PendingNativeSource {
   readonly noticeId: string;
+  /**
+   * 同一播放请求被 Plex 重复发出时，旧通知已经交给页面，页面可能正用旧 noticeId 发起接管。
+   * 新通知替换旧通知但保留旧 ID，接管按同一请求处理，不因通知更替失败。
+   */
+  readonly earlierNoticeIds: readonly string[];
   readonly notice: PlexMediaSourceNotice;
   readonly startSeconds?: number;
   timeout?: ReturnType<typeof setTimeout>;
@@ -121,10 +126,15 @@ export class PlexNativePlaybackHost {
       this.options.releaseNotice?.(message);
       return;
     }
-    if (previous && previous.notice !== message) this.releaseSource(message.requestKey, previous);
+    if (previous && previous.notice !== message) {
+      this.sources.delete(message.requestKey);
+      this.clearSourceTimeout(previous);
+      this.options.releaseNotice?.(previous.notice);
+    }
     const startSeconds = this.options.readStartSeconds();
     const source: PendingNativeSource = {
       noticeId: this.createNoticeId(),
+      earlierNoticeIds: previous ? [previous.noticeId, ...previous.earlierNoticeIds] : [],
       notice: message,
       ...(startSeconds !== undefined ? { startSeconds } : {}),
     };
@@ -182,7 +192,7 @@ export class PlexNativePlaybackHost {
     sessionId: string,
   ): Promise<void> {
     const source = this.sources.get(requestKey);
-    if (!source || source.noticeId !== noticeId) {
+    if (!source || (source.noticeId !== noticeId && !source.earlierNoticeIds.includes(noticeId))) {
       this.postTakeoverError(sessionId, 'source_unavailable');
       return;
     }

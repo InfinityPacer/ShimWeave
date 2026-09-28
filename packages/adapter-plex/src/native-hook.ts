@@ -141,6 +141,18 @@ export class PlexNativeHookController {
     if (message.sender !== 'extension-host') return;
     if (message.type === 'source-available') {
       const tracked = this.loads.get(message.requestKey);
+      // Plex 重复发出同一播放请求时 Host 会换发新通知；接管已在准备中就沿用旧通知，
+      // 不能拒绝新通知，否则 Host 会把这次请求的媒体源一并释放。
+      if (
+        tracked &&
+        !tracked.settled &&
+        tracked.sourceKey === message.sourceKey &&
+        tracked.takeover &&
+        !tracked.takeover.started &&
+        tracked.takeover.stopTask === undefined
+      ) {
+        return;
+      }
       if (
         !tracked ||
         tracked.settled ||
@@ -288,6 +300,17 @@ export class PlexNativeHookController {
       this.rejectSource(tracked.requestKey, source.noticeId);
       tracked.takeoverStarted.resolve();
       return;
+    }
+    // 两个 Shaka load 并发时，后确认媒体源的一方可能在前一方已接管后才开始接管。
+    // 先按替换停止前一个会话（它的 load 正常结束），再发起新接管，避免两路会话互相中断。
+    const previous = this.active;
+    if (previous && previous !== tracked && previous.takeover) {
+      await this.stopTakeover(previous);
+      if (tracked.settled || this.loads.get(tracked.requestKey) !== tracked) {
+        this.rejectSource(tracked.requestKey, source.noticeId);
+        tracked.takeoverStarted.resolve();
+        return;
+      }
     }
     this.sources.delete(tracked.requestKey);
     const sessionId = this.createSessionId();
