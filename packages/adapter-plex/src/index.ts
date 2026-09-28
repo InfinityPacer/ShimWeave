@@ -124,6 +124,7 @@ export const plexControlV1Provider: MediaSourceProvider<PlexMediaSourceContext> 
         url: controlUrl.href,
         requestHeaders: { 'X-ShimWeave-Control-Token': controlToken },
         responseUrlHeader: 'X-ShimWeave-Media-Url',
+        responseMaxAgeHeader: 'X-ShimWeave-Media-Url-Max-Age',
         expectedStatus: 204,
       },
     };

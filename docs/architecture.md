@@ -424,7 +424,9 @@ Plex 私有 webpack/Shaka 接入只允许存在于 `adapter-plex`。Hook 通过�
 不改变决策语义。媒体服务仅在已有 Direct Play Grant、
 准确 Media/Part 和当前 Plex 授权都成立时返回控制描述。描述包含稳定内容身份、固定同源控制路径
 及独立 bearer；bearer 只进入控制请求头。媒体服务每次通过上游解析服务获取临时 URL 后仍只返回
-控制描述，媒体字节保持 CDN 直达浏览器。
+控制描述，媒体字节保持 CDN 直达浏览器。控制端点可以在 `X-ShimWeave-Media-Url-Max-Age` 里给出临时 URL 的复用
+秒数（上限 600），期内的 Range 直接复用该地址，不再逐块访问控制端点；CDN 拒绝或连接失败时丢弃
+复用的地址重新换取。没有这个响应头时每块都换取一次，与不提供该响应头的旧版媒体服务一致。
 
 Chrome `requestId` 将一次 `start.mpd` 的开始和响应关联起来，播放分组只包含 Plex origin、
 metadata path 和 Media/Part 索引，不包含会在 Direct Stream 与 Transcode 回退间变化的
