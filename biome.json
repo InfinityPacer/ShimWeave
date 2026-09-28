@@ -1,7 +1,14 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.11/schema.json",
   "files": {
-    "includes": ["**", "!!**/dist", "!!**/dist-types", "!!coverage", "!!.workbench"]
+    "includes": [
+      "**",
+      "!!**/dist",
+      "!!**/dist-types",
+      "!!coverage",
+      "!!.workbench",
+      "!!packages/codec-truehd/wasm"
+    ]
   },
   "formatter": {
     "enabled": true,

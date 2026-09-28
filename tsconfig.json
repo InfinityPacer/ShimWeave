@@ -5,6 +5,7 @@
     { "path": "packages/core" },
     { "path": "packages/io-fetch" },
     { "path": "packages/engine-mediabunny" },
+    { "path": "packages/codec-truehd" },
     { "path": "packages/adapter-plex" },
     { "path": "apps/chrome-extension" }
   ]
