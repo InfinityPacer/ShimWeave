@@ -39,6 +39,10 @@
       "32": "icons/icon-32.png"
     }
   },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
   "web_accessible_resources": [
     {
       "resources": [

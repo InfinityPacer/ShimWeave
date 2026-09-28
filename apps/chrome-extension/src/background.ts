@@ -7,6 +7,11 @@ import {
   parsePlexTimelineContext,
   plexAdapterManifest,
 } from '@shimweave/adapter-plex';
+import {
+  fetchPlexStreamSelection,
+  isPlexStreamSelectionMessage,
+  type PlexStreamSelectionMessage,
+} from './plex-stream-selection.js';
 import { PlexTimelineDispatcher } from './plex-timeline-dispatcher.js';
 import { isPlexTimelineMessage, PLEX_TIMELINE_RELEASE_MESSAGE } from './plex-timeline-protocol.js';
 import { PlexTimelineSessionStore } from './plex-timeline-session-store.js';
@@ -118,6 +123,10 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     void handleTimelineMessage(message, sender).then(sendResponse, () => sendResponse(false));
     return true;
   }
+  if (isPlexStreamSelectionMessage(message)) {
+    void handleStreamSelectionMessage(message, sender).then(sendResponse, () => sendResponse({}));
+    return true;
+  }
   if (typeof message !== 'object' || message === null || !('type' in message)) return false;
   if (message.type !== 'shimweave:health') return false;
 
@@ -221,6 +230,21 @@ const handleTimelineMessage = async (
     await timelineSessionStore.remove(message.reportId).catch(() => undefined);
   }
   return accepted;
+};
+
+const handleStreamSelectionMessage = async (
+  message: PlexStreamSelectionMessage,
+  sender: chrome.runtime.MessageSender,
+) => {
+  if (!acceptsPlexSender(sender)) return {};
+  await restoreTimelineBinding(message.reportId);
+  const context = timelineDispatcher.context(message.reportId, {
+    tabId: sender.tab?.id,
+    frameId: sender.frameId,
+    pageOrigin: pageOrigin(sender.url),
+  });
+  if (!context) return {};
+  return fetchPlexStreamSelection(context, message.mediaIndex, message.partIndex);
 };
 
 const activateSiteAdapter = async (

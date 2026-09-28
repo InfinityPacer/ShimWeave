@@ -3,14 +3,19 @@ import {
   isPlexNativeMessage,
   isPlexRequestStartedNotice,
   PLEX_NATIVE_PROTOCOL,
+  type PlexMediaSourceNotice,
   type PlexNativeMessage,
+  type PlexStreamSelection,
   parsePlexTimelineSeconds,
   plexAdapterManifest,
 } from '@shimweave/adapter-plex';
 import { BrowserCapabilityRuntime, createBrowserCapabilityScope } from './capability-runtime.js';
+import { readSettings } from './extension-settings.js';
 import { BrowserPlaybackRuntime } from './playback-runtime.js';
+import { PlexAudioNotice } from './plex-audio-notice.js';
 import { PlexErrorPresenter } from './plex-error-presenter.js';
 import { PlexNativePlaybackHost } from './plex-native-host.js';
+import { PLEX_STREAM_SELECTION_MESSAGE } from './plex-stream-selection.js';
 import {
   PLEX_TIMELINE_RELEASE_MESSAGE,
   type PlexTimelineMessage,
@@ -42,6 +47,7 @@ function startPlexRuntime(): ActivePlexRuntime {
   let capabilityRuntime: BrowserCapabilityRuntime | undefined;
   const activation = new SiteAdapterClientActivation({ activate: requestActivation });
   const errorPresenter = new PlexErrorPresenter({ document });
+  const audioNotice = new PlexAudioNotice(document);
   const postPageMessage = (message: PlexNativeMessage): void =>
     window.postMessage(message, location.origin);
   const host = new PlexNativePlaybackHost({
@@ -70,6 +76,9 @@ function startPlexRuntime(): ActivePlexRuntime {
       });
     },
     presentFailure: (failure, formats) => errorPresenter.arm(failure.code, formats),
+    resolveStreamSelection: requestStreamSelection,
+    readAudioFallback: async () => (await readSettings()).audioFallback,
+    presentAudioSubstitution: (requested, playing) => audioNotice.show(requested, playing),
   });
 
   const onRuntimeMessage = (message: unknown): false => {
@@ -124,6 +133,7 @@ function startPlexRuntime(): ActivePlexRuntime {
       chrome.runtime.onMessage.removeListener(onRuntimeMessage);
       window.removeEventListener('message', onPageMessage);
       errorPresenter.dispose();
+      audioNotice.dispose();
       await host.dispose();
       capabilityRuntime?.close();
     },
@@ -140,6 +150,28 @@ function requestActivation(): Promise<boolean> {
           return;
         }
         resolve(response?.activated === true && response.adapterId === plexAdapterManifest.id);
+      },
+    );
+  });
+}
+
+/** 音轨选择由后台用播放会话凭据读取，页面只拿到位置与编码。 */
+function requestStreamSelection(notice: PlexMediaSourceNotice): Promise<PlexStreamSelection> {
+  if (!notice.playbackReportId) return Promise.resolve({});
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        type: PLEX_STREAM_SELECTION_MESSAGE,
+        reportId: notice.playbackReportId,
+        mediaIndex: notice.mediaIndex,
+        partIndex: notice.partIndex,
+      },
+      (response: PlexStreamSelection | undefined) => {
+        if (chrome.runtime.lastError) {
+          resolve({});
+          return;
+        }
+        resolve(response ?? {});
       },
     );
   });

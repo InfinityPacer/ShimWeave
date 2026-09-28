@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>ShimWeave weave glyph mark</title>
+  <circle cx="64" cy="64" r="58" fill="#171717"/>
+  <g transform="translate(16 16) scale(.75)">
+    <path
+      d="M18 26 46 102 64 58 82 102 110 26"
+      fill="none"
+      stroke="#f3f0e8"
+      stroke-width="18"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M46 102 64 58"
+      fill="none"
+      stroke="#db4b2b"
+      stroke-width="18"
+      stroke-linecap="round"
+    />
+  </g>
+</svg>

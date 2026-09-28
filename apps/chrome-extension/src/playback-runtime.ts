@@ -1,4 +1,5 @@
 import type {
+  AudioFallbackPolicy,
   AudioTranscodeOutput,
   MediaDescriptor,
   MediaSourceDescriptor,
@@ -27,10 +28,15 @@ export interface BrowserPlaybackRequest {
   source: MediaSourceDescriptor;
   mediaElement: HTMLMediaElement;
   preferredAudioTrackId?: string;
+  /** 站点只知道自己的音轨编号时，在媒体描述完成后把选择对应到引擎音轨。 */
+  selectAudioTrack?(descriptor: MediaDescriptor): string | undefined;
+  audioFallback?: AudioFallbackPolicy;
   preferredSubtitleTrackId?: string;
   startSeconds?: number;
   /** 媒体描述完成后立即发布只读事实，使启动失败也能展示准确格式。 */
   onDescriptor?(descriptor: MediaDescriptor): void;
+  /** 规划完成、开始缓冲之前发布计划，使音轨替换等决定不必等到起播才告知用户。 */
+  onPlan?(plan: PlaybackPlan, descriptor: MediaDescriptor): void;
 }
 
 export interface ActiveBrowserPlayback {
@@ -136,12 +142,13 @@ export class BrowserPlaybackRuntime {
       const descriptor = await worker.describe();
       this.assertCurrent(generation);
       request.onDescriptor?.(descriptor);
+      const preferredAudioTrackId =
+        request.preferredAudioTrackId ?? request.selectAudioTrack?.(descriptor);
       const result = await this.capabilities.plan({
         media: descriptor,
         nativeSourceUrlAvailable: request.source.nativePlaybackUrl !== undefined,
-        ...(request.preferredAudioTrackId
-          ? { preferredAudioTrackId: request.preferredAudioTrackId }
-          : {}),
+        ...(preferredAudioTrackId ? { preferredAudioTrackId } : {}),
+        ...(request.audioFallback ? { audioFallback: request.audioFallback } : {}),
         ...(request.preferredSubtitleTrackId
           ? { preferredSubtitleTrackId: request.preferredSubtitleTrackId }
           : {}),
@@ -149,6 +156,7 @@ export class BrowserPlaybackRuntime {
       });
       this.assertCurrent(generation);
       const plan = executablePlan(result);
+      request.onPlan?.(plan, descriptor);
       const observer = new PlaybackEvidenceObserver({
         mediaElement: request.mediaElement,
         plan,

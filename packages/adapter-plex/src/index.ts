@@ -11,6 +11,7 @@ export * from './native-hook.js';
 export * from './native-protocol.js';
 export * from './request-identity.js';
 export * from './shaka-runtime-watcher.js';
+export * from './stream-selection.js';
 
 export {
   createPlexTimelineRequest,

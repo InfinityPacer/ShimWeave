@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ShimWeave 设置</title>
+    <style>
+      :root {
+        --ink: #171717;
+        --paper: #f3f0e8;
+        --accent: #db4b2b;
+        --bg: #fbfaf7;
+        --surface: #ffffff;
+        --text: #1d1c1a;
+        --muted: #6b6760;
+        --line: #e4e0d6;
+        --focus: color-mix(in oklch, var(--accent) 45%, transparent);
+        color-scheme: light dark;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #141413;
+          --surface: #1d1c1a;
+          --text: #f3f0e8;
+          --muted: #a39e94;
+          --line: #34322e;
+        }
+        header img { border-radius: 50%; box-shadow: 0 0 0 1px var(--line); }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+      }
+      main { max-width: 560px; padding: 24px 20px 28px; }
+      header { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+      header img { width: 36px; height: 36px; }
+      h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: 0.01em; }
+      header p { margin: 1px 0 0; color: var(--muted); font-size: 12.5px; }
+      fieldset { margin: 0; padding: 0; border: 0; }
+      legend { padding: 0; margin-bottom: 4px; font-weight: 600; font-size: 14px; }
+      .lead { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; }
+      .options { display: grid; gap: 8px; }
+      label.option {
+        display: grid;
+        grid-template-columns: 18px 1fr;
+        gap: 10px;
+        align-items: start;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface);
+        cursor: pointer;
+        transition: border-color 120ms ease;
+      }
+      label.option:hover { border-color: color-mix(in oklch, var(--accent) 35%, var(--line)); }
+      label.option:has(input:checked) { border-color: var(--accent); }
+      input[type="radio"] { margin: 3px 0 0; accent-color: var(--accent); width: 16px; height: 16px; }
+      input[type="radio"]:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+      .title { font-weight: 560; }
+      .hint { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; }
+      .status { min-height: 20px; margin: 12px 0 0; color: var(--muted); font-size: 12.5px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/shimweave-mark.svg" alt="" />
+        <div>
+          <h1>ShimWeave 设置</h1>
+          <p>只影响由 ShimWeave 接管的网页播放</p>
+        </div>
+      </header>
+      <form id="settings">
+        <fieldset>
+          <legend>音轨放不了时</legend>
+          <p class="lead">默认播放 Plex 里选中的音轨。浏览器解不了这条音轨时的处理方式</p>
+          <div class="options">
+            <label class="option">
+              <input type="radio" name="audioFallback" value="compatible" />
+              <span>
+                <span class="title">改用能播放的音轨</span>
+                <span class="hint">优先同一语言，开始播放时在画面上方提示改用了哪一条</span>
+              </span>
+            </label>
+            <label class="option">
+              <input type="radio" name="audioFallback" value="strict" />
+              <span>
+                <span class="title">不播放，显示原因</span>
+                <span class="hint">适合只想听选中音轨的情况，可以回 Plex 换一条音轨再播</span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+      </form>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

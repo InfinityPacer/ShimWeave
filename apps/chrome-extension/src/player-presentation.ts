@@ -124,6 +124,27 @@ export const formatAudioTrackLabel = (track: AudioMediaTrack): string => {
   return [...identity, ...technical].join(' · ');
 };
 
+/** 替换提示用的短标签，例如「TrueHD 6 声道 · 英语」，语言按浏览器界面语言显示。 */
+export const formatAudioShortLabel = (track: AudioMediaTrack, locale = 'zh-CN'): string => {
+  const technical = [
+    formatAudioCodec(track.codec),
+    track.channels ? formatChannels(track.channels) : undefined,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const language = displayLanguage(track.language, locale);
+  return language ? `${technical} · ${language}` : technical;
+};
+
+const displayLanguage = (code: string | undefined, locale: string): string | undefined => {
+  if (!code || code === 'und') return undefined;
+  try {
+    return new Intl.DisplayNames([locale], { type: 'language' }).of(code) ?? code;
+  } catch {
+    return code;
+  }
+};
+
 /** 页面错误提示只使用媒体结构事实，不暴露源地址、文件名或内部轨道标识。 */
 export const formatMediaFormats = (descriptor: MediaDescriptor): MediaFormatPresentation => {
   const video = descriptor.tracks.find((track): track is VideoMediaTrack => track.kind === 'video');
@@ -182,6 +203,8 @@ const formatAudioCodec = (codec: string): string => {
 const formatChannels = (channels: number): string => {
   if (channels === 1) return '单声道';
   if (channels === 2) return '立体声';
+  if (channels === 6) return '5.1 声道';
+  if (channels === 8) return '7.1 声道';
   return `${channels} 声道`;
 };
 
