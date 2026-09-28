@@ -1,13 +1,21 @@
 import type { HdrConfiguration, Rational } from '@shimweave/contracts';
+import {
+  type ElementHeader,
+  findElement,
+  forEachElement,
+  parseSeekEntries,
+  type RangeReader,
+  readAscii,
+  readElementHeader,
+  readFloat,
+  readUnsigned,
+} from './ebml.js';
 
 const MAX_HEADER_PROBE_BYTES = 512 * 1024;
 
 const ID = {
   segment: 0x18538067,
   seekHead: 0x114d9b74,
-  seek: 0x4dbb,
-  seekId: 0x53ab,
-  seekPosition: 0x53ac,
   tracks: 0x1654ae6b,
   trackEntry: 0xae,
   trackNumber: 0xd7,
@@ -35,22 +43,6 @@ const ID = {
 } as const;
 
 const DOLBY_VISION_BLOCK_TYPES = new Set([0x64766343, 0x64767643, 0x64767743]);
-
-interface RangeReader {
-  read(start: number, end: number): Promise<Uint8Array>;
-}
-
-interface ElementHeader {
-  id: number;
-  elementStart: number;
-  dataStart: number;
-  dataEnd: number | undefined;
-}
-
-interface SeekEntry {
-  id: number;
-  position: number;
-}
 
 export interface MatroskaTrackMetadata {
   frameRate?: Rational;
@@ -281,121 +273,4 @@ const serializeMasteringDisplay = (
     return value === undefined ? [] : [`${name}=${value}`];
   });
   return fields.length > 0 ? fields.join(',') : undefined;
-};
-
-const parseSeekEntries = (bytes: Uint8Array, seekHead: ElementHeader): SeekEntry[] => {
-  if (seekHead.dataEnd === undefined) return [];
-  const result: SeekEntry[] = [];
-  forEachElement(bytes, seekHead.dataStart, seekHead.dataEnd, (element) => {
-    if (element.id !== ID.seek || element.dataEnd === undefined) return;
-    const elementEnd = element.dataEnd;
-    let id: number | undefined;
-    let position: number | undefined;
-    forEachElement(bytes, element.dataStart, elementEnd, (child) => {
-      if (child.dataEnd === undefined || child.dataEnd > elementEnd) return;
-      if (child.id === ID.seekId) id = readUnsigned(bytes, child);
-      if (child.id === ID.seekPosition) position = readUnsigned(bytes, child);
-    });
-    if (id !== undefined && position !== undefined) result.push({ id, position });
-  });
-  return result;
-};
-
-const findElement = (
-  bytes: Uint8Array,
-  start: number,
-  end: number,
-  id: number,
-): ElementHeader | undefined => {
-  let found: ElementHeader | undefined;
-  forEachElement(bytes, start, end, (element) => {
-    if (!found && element.id === id) found = element;
-  });
-  return found;
-};
-
-const forEachElement = (
-  bytes: Uint8Array,
-  start: number,
-  end: number,
-  visit: (element: ElementHeader) => void,
-): void => {
-  let offset = start;
-  while (offset < end) {
-    const element = readElementHeader(bytes, offset);
-    if (!element || element.dataStart > end) return;
-    visit(element);
-    if (element.dataEnd === undefined || element.dataEnd <= offset || element.dataEnd > end) return;
-    offset = element.dataEnd;
-  }
-};
-
-const readElementHeader = (bytes: Uint8Array, offset: number): ElementHeader | undefined => {
-  const id = readVint(bytes, offset, true);
-  if (!id) return undefined;
-  const size = readVint(bytes, offset + id.length, false);
-  if (!size) return undefined;
-  const dataStart = offset + id.length + size.length;
-  const dataEnd = size.value === undefined ? undefined : dataStart + size.value;
-  if (dataStart > bytes.length || (dataEnd !== undefined && !Number.isSafeInteger(dataEnd))) {
-    return undefined;
-  }
-  return { id: id.value ?? 0, elementStart: offset, dataStart, dataEnd };
-};
-
-const readVint = (
-  bytes: Uint8Array,
-  offset: number,
-  keepMarker: boolean,
-): { value: number | undefined; length: number } | undefined => {
-  const first = bytes[offset];
-  if (first === undefined || first === 0) return undefined;
-  let length = 1;
-  let marker = 0x80;
-  while ((first & marker) === 0) {
-    marker >>= 1;
-    length++;
-  }
-  if (length > 8 || offset + length > bytes.length) return undefined;
-  let value = keepMarker ? first : first & (marker - 1);
-  let unknown = !keepMarker && value === marker - 1;
-  for (let index = 1; index < length; index++) {
-    const byte = bytes[offset + index];
-    if (byte === undefined) return undefined;
-    value = value * 256 + byte;
-    unknown &&= byte === 0xff;
-  }
-  return { value: unknown ? undefined : value, length };
-};
-
-const readUnsigned = (bytes: Uint8Array, element: ElementHeader): number | undefined => {
-  if (element.dataEnd === undefined || element.dataEnd - element.dataStart > 6) return undefined;
-  let value = 0;
-  for (let offset = element.dataStart; offset < element.dataEnd; offset++) {
-    const byte = bytes[offset];
-    if (byte === undefined) return undefined;
-    value = value * 256 + byte;
-  }
-  return Number.isSafeInteger(value) ? value : undefined;
-};
-
-const readFloat = (bytes: Uint8Array, element: ElementHeader): number | undefined => {
-  if (element.dataEnd === undefined) return undefined;
-  const length = element.dataEnd - element.dataStart;
-  if (length !== 4 && length !== 8) return undefined;
-  const view = new DataView(bytes.buffer, bytes.byteOffset + element.dataStart, length);
-  const value = length === 4 ? view.getFloat32(0) : view.getFloat64(0);
-  return Number.isFinite(value) ? value : undefined;
-};
-
-const readAscii = (bytes: Uint8Array, element: ElementHeader): string | undefined => {
-  if (element.dataEnd === undefined) return undefined;
-  let result = '';
-  for (let offset = element.dataStart; offset < element.dataEnd; offset++) {
-    const byte = bytes[offset];
-    if (byte === undefined) return undefined;
-    if (byte > 0x7f) return undefined;
-    result += String.fromCharCode(byte);
-  }
-  return result;
 };
