@@ -9,12 +9,16 @@ import type {
   MediaFragmentSink,
   MediaFragmentStream,
   MediaFragmentStreamOptions,
+  MediaSubtitleStream,
+  MediaSubtitleStreamOptions,
   MediaTrack,
   MediaTrackBase,
   Rational,
+  SubtitleCueSink,
   SubtitleMediaTrack,
   VideoMediaTrack,
 } from '@shimweave/contracts';
+import { RENDERABLE_SUBTITLE_CODECS } from '@shimweave/contracts';
 import {
   ALL_FORMATS,
   Input,
@@ -22,6 +26,7 @@ import {
   type InputTrack,
   type InputVideoTrack,
 } from 'mediabunny';
+import { ByteCoverage } from './byte-coverage.js';
 import {
   copyDecoderDescription,
   fingerprintBytes,
@@ -36,7 +41,16 @@ import {
   readIsobmffDolbyVisionTrackMetadata,
 } from './isobmff-dolby-vision.js';
 import { type MatroskaTrackMetadata, readMatroskaTrackMetadata } from './matroska-hdr.js';
-import { MediabunnyByteSourceAdapter } from './source-adapter.js';
+import {
+  extractMatroskaSubtitles,
+  type MatroskaCuePoint,
+  type MatroskaSubtitleLayout,
+  MatroskaSubtitleUnavailableError,
+  readMatroskaCuePoints,
+  readMatroskaSubtitleLayout,
+  subtitleMediaTrack,
+} from './matroska-subtitles.js';
+import { MediabunnyByteSourceAdapter, MediabunnySourceReadError } from './source-adapter.js';
 
 /**
  * MediabunnyMediaSession 绑定一个媒体输入生命周期。部分容器缺少 decoder config 时，
@@ -47,6 +61,10 @@ export class MediabunnyMediaSession implements MediaEngineSession {
   private readonly input: Input;
   private descriptorPromise: Promise<MediaDescriptor> | undefined;
   private closePromise: Promise<void> | undefined;
+  private subtitleLayout: MatroskaSubtitleLayout | undefined;
+  private cuePointsPromise: Promise<readonly MatroskaCuePoint[]> | undefined;
+  private readonly subtitleStreams = new Set<AbortController>();
+  private readonly lifetime = new AbortController();
 
   constructor(private readonly bytes: ByteSource) {
     this.adapter = new MediabunnyByteSourceAdapter(bytes);
@@ -82,11 +100,104 @@ export class MediabunnyMediaSession implements MediaEngineSession {
     return startMediaFragmentStream(this.input, sink, options);
   }
 
+  /**
+   * 内嵌字幕跟在同一代视频流后面读取：只解析视频流在本代已经读到的簇，
+   * 不单独下载媒体数据，也不参与视频背压。失败只通过 sink.fail 报告。
+   */
+  startSubtitleStream(
+    sink: SubtitleCueSink,
+    options: MediaSubtitleStreamOptions,
+  ): MediaSubtitleStream {
+    const controller = new AbortController();
+    // 覆盖记录必须先于视频流开始读取，本代的第一个簇才不会漏掉。
+    const coverage = new ByteCoverage();
+    const stopObserving = this.adapter.observeReads((start, end) => coverage.add(start, end));
+    this.subtitleStreams.add(controller);
+    const signal = controller.signal;
+    const completion = (async () => {
+      try {
+        if (this.closePromise) throw new MediabunnyMediaSessionClosedError();
+        const descriptor = await this.describe();
+        const track = descriptor.tracks.find(
+          (candidate) => candidate.kind === 'subtitle' && candidate.id === options.trackId,
+        );
+        const matroskaTrack = this.subtitleLayout?.subtitleTracks.find(
+          (candidate) => String(candidate.trackNumber) === options.trackId,
+        );
+        if (!track || !matroskaTrack || !this.subtitleLayout) {
+          throw new MatroskaSubtitleUnavailableError('track_not_found');
+        }
+        if (!RENDERABLE_SUBTITLE_CODECS.has(track.codec)) {
+          throw new MatroskaSubtitleUnavailableError('unsupported_codec');
+        }
+        const layout = this.subtitleLayout;
+        // Cues 在描述阶段已被解封装器读过；只缓存成功结果，失败的下一代再试。
+        if (!this.cuePointsPromise) {
+          const pending = readMatroskaCuePoints(
+            { read: (start, end) => this.readForSubtitles(start, end, this.lifetime.signal) },
+            layout,
+          );
+          this.cuePointsPromise = pending;
+          pending.catch(() => {
+            if (this.cuePointsPromise === pending) this.cuePointsPromise = undefined;
+          });
+        }
+        const cuePoints: readonly MatroskaCuePoint[] = await this.cuePointsPromise.catch(() => []);
+        const videoTrackNumber = options.videoTrackId ? Number(options.videoTrackId) : undefined;
+        await extractMatroskaSubtitles({
+          read: (start, end, readSignal) => this.readForSubtitles(start, end, readSignal),
+          coverage,
+          layout,
+          cuePoints,
+          track: matroskaTrack,
+          startSeconds: options.startSeconds ?? 0,
+          ...(videoTrackNumber !== undefined && Number.isSafeInteger(videoTrackNumber)
+            ? { videoTrackNumber }
+            : {}),
+          sink,
+          signal,
+        });
+      } catch (error) {
+        if (signal.aborted) return;
+        sink.fail(error instanceof MatroskaSubtitleUnavailableError ? error.reason : 'read_failed');
+      } finally {
+        stopObserving();
+        coverage.close(new MediabunnySubtitleStreamCancelledError());
+        this.subtitleStreams.delete(controller);
+      }
+    })();
+    return {
+      completion,
+      cancel: async () => {
+        if (!signal.aborted) controller.abort(new MediabunnySubtitleStreamCancelledError());
+        coverage.close(new MediabunnySubtitleStreamCancelledError());
+        await completion;
+      },
+    };
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
+    this.lifetime.abort(new MediabunnyMediaSessionClosedError());
+    for (const controller of this.subtitleStreams) {
+      controller.abort(new MediabunnySubtitleStreamCancelledError());
+    }
     this.input.dispose();
     this.closePromise = this.adapter.close();
     return this.closePromise;
+  }
+
+  /** 字幕读取直接走底层 ByteSource，不计入视频流的覆盖区间。 */
+  private async readForSubtitles(
+    start: number,
+    end: number,
+    signal: AbortSignal,
+  ): Promise<Uint8Array> {
+    const bytes = await this.bytes.read({ start, end }, signal);
+    if (bytes.byteLength !== end - start) {
+      throw new MediabunnySourceReadError(end - start, bytes.byteLength);
+    }
+    return bytes;
   }
 
   private async readDescriptor(): Promise<MediaDescriptor> {
@@ -102,33 +213,42 @@ export class MediabunnyMediaSession implements MediaEngineSession {
       internalCodecIds.some(
         (codec) => typeof codec === 'string' && ['dvh1', 'dvhe'].includes(codec.toLowerCase()),
       );
-    const [duration, mappedTracks, matroskaTracks, isobmffDolbyVisionTracks] = await Promise.all([
-      this.input.getDurationFromMetadata(tracks, { skipLiveWait: true }),
-      Promise.all(tracks.map((track) => describeTrack(track, container !== 'matroska'))),
-      container === 'matroska'
-        ? readMatroskaTrackMetadata(this.adapter, sizeBytes).catch(
-            () => new Map<number, MatroskaTrackMetadata>(),
-          )
-        : Promise.resolve(new Map<number, MatroskaTrackMetadata>()),
-      needsDolbyVisionBoxProbe
-        ? readIsobmffDolbyVisionTrackMetadata(this.adapter, sizeBytes).catch(
-            () => new Map<number, IsobmffDolbyVisionTrackMetadata>(),
-          )
-        : Promise.resolve(new Map<number, IsobmffDolbyVisionTrackMetadata>()),
-    ]);
+    const [duration, mappedTracks, matroskaTracks, isobmffDolbyVisionTracks, subtitleLayout] =
+      await Promise.all([
+        this.input.getDurationFromMetadata(tracks, { skipLiveWait: true }),
+        Promise.all(tracks.map((track) => describeTrack(track, container !== 'matroska'))),
+        container === 'matroska'
+          ? readMatroskaTrackMetadata(this.adapter, sizeBytes).catch(
+              () => new Map<number, MatroskaTrackMetadata>(),
+            )
+          : Promise.resolve(new Map<number, MatroskaTrackMetadata>()),
+        needsDolbyVisionBoxProbe
+          ? readIsobmffDolbyVisionTrackMetadata(this.adapter, sizeBytes).catch(
+              () => new Map<number, IsobmffDolbyVisionTrackMetadata>(),
+            )
+          : Promise.resolve(new Map<number, IsobmffDolbyVisionTrackMetadata>()),
+        // Mediabunny 不列出字幕轨，Matroska 的字幕 TrackEntry 由项目自己读取。
+        container === 'matroska'
+          ? readMatroskaSubtitleLayout(this.adapter, sizeBytes).catch(() => undefined)
+          : Promise.resolve(undefined),
+      ]);
+    this.subtitleLayout = subtitleLayout;
     const descriptor: MediaDescriptor = {
       sourceId: this.bytes.sourceId,
       sizeBytes,
       container,
       mimeType: format.mimeType,
-      tracks: mappedTracks.map((track) => {
-        if (track.kind !== 'video') return track;
-        return mergeSupplementalVideoMetadata(
-          track,
-          matroskaTracks.get(Number(track.id)),
-          isobmffDolbyVisionTracks.get(Number(track.id)),
-        );
-      }),
+      tracks: [
+        ...mappedTracks.map((track) => {
+          if (track.kind !== 'video') return track;
+          return mergeSupplementalVideoMetadata(
+            track,
+            matroskaTracks.get(Number(track.id)),
+            isobmffDolbyVisionTracks.get(Number(track.id)),
+          );
+        }),
+        ...(subtitleLayout?.subtitleTracks.map(subtitleMediaTrack) ?? []),
+      ],
     };
     if (duration !== null && Number.isFinite(duration) && duration >= 0) {
       descriptor.durationSeconds = duration;
@@ -138,6 +258,13 @@ export class MediabunnyMediaSession implements MediaEngineSession {
 }
 
 const FRAME_RATE_PROBE_PACKET_COUNT = 256;
+
+export class MediabunnySubtitleStreamCancelledError extends Error {
+  constructor() {
+    super('Subtitle stream was cancelled');
+    this.name = 'MediabunnySubtitleStreamCancelledError';
+  }
+}
 
 export class MediabunnyMediaSessionClosedError extends Error {
   constructor() {

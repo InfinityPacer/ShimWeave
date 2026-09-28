@@ -13,6 +13,7 @@ export class MediabunnyByteSourceAdapter {
 
   private readonly lifetime = new AbortController();
   private readonly onDisposeError: ((error: unknown) => void) | undefined;
+  private readonly readObservers = new Set<(start: number, end: number) => void>();
   private size: number | undefined;
   private sizePromise: Promise<number> | undefined;
   private closePromise: Promise<void> | undefined;
@@ -65,7 +66,22 @@ export class MediabunnyByteSourceAdapter {
     if (result.byteLength !== expected) {
       throw new MediabunnySourceReadError(expected, result.byteLength);
     }
+    for (const observe of this.readObservers) {
+      try {
+        observe(start, end);
+      } catch {
+        // 观察者只服务字幕等旁路读取，异常不能影响解封装。
+      }
+    }
     return result;
+  }
+
+  /** 观察解封装器实际读到的字节区间；只通知位置，不暴露字节，返回值用于解除观察。 */
+  observeReads(observer: (start: number, end: number) => void): () => void {
+    this.readObservers.add(observer);
+    return () => {
+      this.readObservers.delete(observer);
+    };
   }
 
   /** Input.dispose 会同步调用此方法；异步底层关闭由 close() 提供可等待边界。 */

@@ -305,7 +305,58 @@ export interface PlaybackPlan {
   outputAudio?: AudioTranscodeOutput;
   /** 选中音轨无法播放、按 compatible 策略改用 audioTrackId 时，记录原本选中的音轨。 */
   audioSubstitution?: { requestedTrackId: string };
+  /** 可以渲染的选中字幕。字幕不参与路径与能力判断，失败也不终止视频会话。 */
   subtitleTrackId?: string;
+  /** 明确选了字幕但无法显示时记录原因，宿主据此提示字幕不可用，不改选其他字幕。 */
+  subtitleUnavailable?: { reason: SubtitleUnavailableReason; codec?: MediaCodec };
+}
+
+/**
+ * 字幕不可用的稳定原因。站点映射失败（mismatch、external）由适配器判定，
+ * 其余由规划器或媒体引擎判定。
+ */
+export type SubtitleUnavailableReason =
+  | 'mismatch'
+  | 'external'
+  | 'track_not_found'
+  | 'unsupported_codec'
+  | 'unsupported_encoding'
+  | 'no_index'
+  | 'read_failed';
+
+/** 目前能在浏览器 TextTrack 上渲染的内嵌字幕编码，图形字幕与 ASS 特效不在其中。 */
+export const RENDERABLE_SUBTITLE_CODECS: ReadonlySet<MediaCodec> = new Set(['srt', 'webvtt']);
+
+/**
+ * 一条字幕 cue。时间使用原媒体绝对秒数；text 是已转义的 WebVTT cue 文本，
+ * 只含 <i>、<b>、<u> 标签和换行，渲染端不得把它当作 HTML。
+ */
+export interface SubtitleCue {
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+  /** 原字幕要求显示在画面上方（例如 SRT 中的 {\an8}）。 */
+  placement?: 'top';
+}
+
+/** 字幕输出不带背压：cue 很小，按簇批量交付；fail 之后不会再有 cue。 */
+export interface SubtitleCueSink {
+  cues(cues: readonly SubtitleCue[]): void;
+  fail(reason: SubtitleUnavailableReason): void;
+}
+
+export interface MediaSubtitleStreamOptions {
+  trackId: string;
+  /** 与同一代视频流相同的起点，字幕从该时间附近的簇开始读取。 */
+  startSeconds?: number;
+  /** 视频流使用的轨道，决定按哪条轨道的索引定位起始簇。 */
+  videoTrackId?: string;
+}
+
+/** 字幕流跟随同一代视频流的生命周期，取消必须可等待且不影响视频流。 */
+export interface MediaSubtitleStream {
+  completion: Promise<void>;
+  cancel(): Promise<void>;
 }
 
 export type PlanningResult =
@@ -379,6 +430,14 @@ export interface MediaEngineSession {
     sink: MediaFragmentSink,
     options?: MediaFragmentStreamOptions,
   ): Promise<MediaFragmentStream>;
+  /**
+   * 可选的内嵌字幕读取。实现只能复用视频流已经读取的字节，不得额外下载媒体数据，
+   * 也不得进入视频分片的背压链路。
+   */
+  startSubtitleStream?(
+    sink: SubtitleCueSink,
+    options: MediaSubtitleStreamOptions,
+  ): MediaSubtitleStream;
   close(): Promise<void>;
 }
 

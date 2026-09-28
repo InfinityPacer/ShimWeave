@@ -550,29 +550,47 @@ describe('planPlayback', () => {
     });
   });
 
-  it('字幕轨道未实现时明确拒绝而不生成无效计划', () => {
-    const media = intent();
-    media.media.tracks = [
-      ...media.media.tracks,
-      {
-        id: 'subtitle-selected',
-        kind: 'subtitle',
-        codec: 'srt',
-      },
-    ];
-    media.preferredSubtitleTrackId = 'subtitle-selected';
+  describe('字幕选择', () => {
+    const withSubtitles = (): PlaybackIntent => {
+      const media = intent({ mimeType: 'video/x-matroska' });
+      media.media.tracks = [
+        ...media.media.tracks,
+        { id: 'subtitle-srt', kind: 'subtitle', codec: 'srt' },
+        { id: 'subtitle-pgs', kind: 'subtitle', codec: 'pgs' },
+      ];
+      return media;
+    };
 
-    expect(planPlayback(media, baseCapabilities())).toEqual({
-      status: 'unsupported',
-      reason: 'subtitle_playback_unavailable',
-      evidence: [],
+    it('选中可显示的字幕时记录轨道并绕开原生路径', () => {
+      const media = withSubtitles();
+      media.preferredSubtitleTrackId = 'subtitle-srt';
+
+      const planned = candidateFrom(planPlayback(media, baseCapabilities()));
+
+      expect(planned.path).toBe('mse-remux');
+      expect(planned.subtitleTrackId).toBe('subtitle-srt');
+      expect(planned.subtitleUnavailable).toBeUndefined();
     });
 
-    media.preferredSubtitleTrackId = 'plex-subtitle-id';
-    expect(planPlayback(media, baseCapabilities())).toEqual({
-      status: 'unsupported',
-      reason: 'preferred_subtitle_track_unavailable',
-      evidence: [],
+    it('图形字幕不可显示时照常规划视频并说明原因', () => {
+      const media = withSubtitles();
+      media.preferredSubtitleTrackId = 'subtitle-pgs';
+
+      const planned = candidateFrom(planPlayback(media, baseCapabilities()));
+
+      expect(planned.path).toBe('native-file');
+      expect(planned.subtitleTrackId).toBeUndefined();
+      expect(planned.subtitleUnavailable).toEqual({ reason: 'unsupported_codec', codec: 'pgs' });
+    });
+
+    it('选中的字幕 ID 不存在时不猜测其他字幕', () => {
+      const media = withSubtitles();
+      media.preferredSubtitleTrackId = 'plex-subtitle-id';
+
+      const planned = candidateFrom(planPlayback(media, baseCapabilities()));
+
+      expect(planned.subtitleTrackId).toBeUndefined();
+      expect(planned.subtitleUnavailable).toEqual({ reason: 'track_not_found' });
     });
   });
 

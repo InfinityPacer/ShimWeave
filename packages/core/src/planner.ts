@@ -14,6 +14,7 @@ import type {
   VideoConfiguration,
   VideoMediaTrack,
 } from '@shimweave/contracts';
+import { RENDERABLE_SUBTITLE_CODECS } from '@shimweave/contracts';
 import { createConfigurationKey, createMediaFingerprint } from './capability-identity.js';
 
 type CandidatePath = Exclude<PlaybackPath, 'webcodecs-video'>;
@@ -56,12 +57,15 @@ export const planPlayback = (
   if (intent.preferredAudioTrackId && !audio) {
     return { status: 'unsupported', reason: 'preferred_audio_track_unavailable', evidence: [] };
   }
-  if (intent.preferredSubtitleTrackId && !subtitle) {
-    return { status: 'unsupported', reason: 'preferred_subtitle_track_unavailable', evidence: [] };
-  }
-  if (subtitle) {
-    return { status: 'unsupported', reason: 'subtitle_playback_unavailable', evidence: [] };
-  }
+  // 字幕只随计划记录，不参与路径与能力判断；选中但不能显示时照常播放视频并说明原因。
+  const subtitleFields: Pick<PlaybackPlan, 'subtitleTrackId' | 'subtitleUnavailable'> =
+    !intent.preferredSubtitleTrackId
+      ? {}
+      : !subtitle
+        ? { subtitleUnavailable: { reason: 'track_not_found' } }
+        : RENDERABLE_SUBTITLE_CODECS.has(subtitle.codec)
+          ? { subtitleTrackId: subtitle.id }
+          : { subtitleUnavailable: { reason: 'unsupported_codec', codec: subtitle.codec } };
   const missingFacts = findMissingFacts(video);
   if (missingFacts.length > 0) {
     return { status: 'probe-required', probes: [{ kind: 'media-facts', fields: missingFacts }] };
@@ -83,8 +87,9 @@ export const planPlayback = (
       video as CompleteVideoTrack,
       attempt,
       mediaFingerprint,
-      // 原生媒体元素只会播放容器默认音轨，选中其他音轨时必须走转封装。
-      attempt === nativeAudio,
+      // 原生媒体元素只会播放容器默认音轨，也无法交出内嵌字幕；选中其他音轨或可显示的字幕时
+      // 必须走转封装。
+      attempt === nativeAudio && subtitleFields.subtitleTrackId === undefined,
     );
     if (candidates.length === 0) {
       if (attempt === audio) rejected.push('audio_no_playback_path');
@@ -94,9 +99,11 @@ export const planPlayback = (
     const substitution =
       audio && attempt && attempt !== audio ? { requestedTrackId: audio.id } : undefined;
     for (const candidate of candidates) {
-      const plan = substitution
-        ? { ...candidate.plan, audioSubstitution: substitution }
-        : candidate.plan;
+      const plan = {
+        ...candidate.plan,
+        ...(substitution ? { audioSubstitution: substitution } : {}),
+        ...subtitleFields,
+      };
       const evaluation = evaluateCandidate(candidate, capabilities, mediaFingerprint);
       if (evaluation.status === 'ready') {
         return { status: 'ready', plan, evidence: evaluation.evidence };
