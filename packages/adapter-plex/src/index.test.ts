@@ -64,6 +64,7 @@ describe('Plex media redirect adapter', () => {
             'X-ShimWeave-Control-Token': 'control_token_12345678901234567890',
           },
           responseUrlHeader: 'X-ShimWeave-Media-Url',
+          responseMaxAgeHeader: 'X-ShimWeave-Media-Url-Max-Age',
           expectedStatus: 204,
         },
       },

@@ -415,6 +415,9 @@ const createMediaSession = async (
           control: {
             requestHeaders: message.source.access.requestHeaders,
             responseUrlHeader: message.source.access.responseUrlHeader,
+            ...(message.source.access.responseMaxAgeHeader !== undefined
+              ? { responseMaxAgeHeader: message.source.access.responseMaxAgeHeader }
+              : {}),
             ...(message.source.access.expectedStatus !== undefined
               ? { expectedStatus: message.source.access.expectedStatus }
               : {}),

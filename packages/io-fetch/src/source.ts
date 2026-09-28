@@ -16,6 +16,8 @@ export interface FetchRangeSourceOptions {
   control?: {
     requestHeaders: Readonly<Record<string, string>>;
     responseUrlHeader: string;
+    /** 控制端点给出地址复用秒数的响应头；缺省时每次 Range 都重新换取。 */
+    responseMaxAgeHeader?: string;
     expectedStatus?: number;
   };
 }
@@ -37,8 +39,15 @@ export class FetchRangeSource implements ByteSource {
 
   readonly #url: string;
   readonly #control:
-    | { requestHeaders: Headers; responseUrlHeader: string; expectedStatus: number }
+    | {
+        requestHeaders: Headers;
+        responseUrlHeader: string;
+        responseMaxAgeHeader: string | undefined;
+        expectedStatus: number;
+      }
     | undefined;
+  /** 控制端点换来的媒体地址及其失效时刻，只在私有字段里保存。 */
+  #controlled: { url: string; expiresAt: number } | undefined;
   private readonly fetch: FetchFunction;
   private readonly active = new Set<AbortController>();
   private bootstrap: { range: ByteRange; bytes: Uint8Array } | undefined;
@@ -66,6 +75,7 @@ export class FetchRangeSource implements ByteSource {
       this.#control = {
         requestHeaders,
         responseUrlHeader,
+        responseMaxAgeHeader: options.control.responseMaxAgeHeader?.trim() || undefined,
         expectedStatus: options.control.expectedStatus ?? 204,
       };
     }
@@ -169,8 +179,24 @@ export class FetchRangeSource implements ByteSource {
   ): Promise<{ range: ByteRange; bytes: Uint8Array; size: number }> {
     const rangeHeader = `bytes=${range.start}-${range.end - 1}`;
     let mediaURL = this.#url;
-    if (this.#control) mediaURL = await this.resolveControlledMediaURL(rangeHeader, signal);
+    if (this.#control) mediaURL = await this.controlledMediaURL(rangeHeader, signal);
     if (signal.aborted) throw abortReason(signal);
+    try {
+      return await this.requestMediaRange(mediaURL, rangeHeader, range, signal, allowEofClamp);
+    } catch (error) {
+      // 复用的地址可能已被 CDN 拒绝或连接失败，丢弃它，下一次读取（含 403 恢复重试）重新换取。
+      if (!signal.aborted && this.#controlled?.url === mediaURL) this.#controlled = undefined;
+      throw error;
+    }
+  }
+
+  private async requestMediaRange(
+    mediaURL: string,
+    rangeHeader: string,
+    range: ByteRange,
+    signal: AbortSignal,
+    allowEofClamp: boolean,
+  ): Promise<{ range: ByteRange; bytes: Uint8Array; size: number }> {
     const response = await this.fetchResponse(
       mediaURL,
       {
@@ -231,10 +257,23 @@ export class FetchRangeSource implements ByteSource {
     };
   }
 
+  /**
+   * 控制端点给了复用期时，期内的 Range 直接使用上次换来的地址，省去每块一次的控制往返。
+   * 并发的首批读取各自换取，不合并，免得一个读取被取消时牵连其它读取。
+   */
+  private async controlledMediaURL(rangeHeader: string, signal: AbortSignal): Promise<string> {
+    const cached = this.#controlled;
+    if (cached && Date.now() < cached.expiresAt) return cached.url;
+    const { url, maxAgeSeconds } = await this.resolveControlledMediaURL(rangeHeader, signal);
+    this.#controlled =
+      maxAgeSeconds > 0 ? { url, expiresAt: Date.now() + maxAgeSeconds * 1000 } : undefined;
+    return url;
+  }
+
   private async resolveControlledMediaURL(
     rangeHeader: string,
     signal: AbortSignal,
-  ): Promise<string> {
+  ): Promise<{ url: string; maxAgeSeconds: number }> {
     const control = this.#control;
     if (!control) throw new RangeProtocolError('missing_control_url');
     const headers = new Headers(control.requestHeaders);
@@ -258,6 +297,9 @@ export class FetchRangeSource implements ByteSource {
       throw new RangeProtocolError('unexpected_control_status', { status: response.status });
     }
     const rawURL = response.headers.get(control.responseUrlHeader)?.trim();
+    const maxAgeSeconds = control.responseMaxAgeHeader
+      ? parseMaxAge(response.headers.get(control.responseMaxAgeHeader))
+      : 0;
     await cancelBody(response);
     if (!rawURL) throw new RangeProtocolError('missing_control_url');
     let mediaURL: URL;
@@ -273,7 +315,7 @@ export class FetchRangeSource implements ByteSource {
     ) {
       throw new RangeProtocolError('invalid_control_url');
     }
-    return mediaURL.href;
+    return { url: mediaURL.href, maxAgeSeconds };
   }
 
   private async fetchResponse(
@@ -299,6 +341,7 @@ export class FetchRangeSource implements ByteSource {
     this.bootstrap = undefined;
     this.sizePromise = undefined;
     this.recoveryPromise = undefined;
+    this.#controlled = undefined;
   }
 
   private assertOpen(): void {
@@ -399,4 +442,12 @@ const withAbort = <T>(promise: Promise<T>, signal: AbortSignal | undefined): Pro
     signal.addEventListener('abort', abort, { once: true });
     void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
+};
+
+/** 复用期上限。签名地址的有效期由控制端点负责，这里只防止异常值让过期地址长期留用。 */
+const MAX_CONTROLLED_URL_AGE_SECONDS = 600;
+
+const parseMaxAge = (value: string | null): number => {
+  if (!value || !/^\d{1,6}$/.test(value.trim())) return 0;
+  return Math.min(Number(value.trim()), MAX_CONTROLLED_URL_AGE_SECONDS);
 };

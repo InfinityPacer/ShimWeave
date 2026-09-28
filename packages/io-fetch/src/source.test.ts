@@ -107,6 +107,107 @@ describe('FetchRangeSource', () => {
     expect({ controlCalls, mediaCalls }).toEqual({ controlCalls: 2, mediaCalls: 2 });
   });
 
+  describe('控制地址复用', () => {
+    const setup = (
+      maxAge: string | undefined,
+      mediaStatus: (call: number) => number = () => 206,
+    ) => {
+      const calls = { control: 0, media: 0, urls: [] as string[] };
+      const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).startsWith('https://plex.example/')) {
+          calls.control += 1;
+          const headers: Record<string, string> = {
+            'X-ShimWeave-Media-Url': `https://cdn.example/media?generation=${calls.control}`,
+          };
+          if (maxAge !== undefined) headers['X-ShimWeave-Media-Url-Max-Age'] = maxAge;
+          return new Response(null, { status: 204, headers });
+        }
+        calls.media += 1;
+        calls.urls.push(String(input));
+        expect(new Headers(init?.headers).get('X-ShimWeave-Control-Token')).toBeNull();
+        const status = mediaStatus(calls.media);
+        if (status !== 206) return response(new Uint8Array(), { status });
+        const range = /bytes=(\d+)-(\d+)/.exec(new Headers(init?.headers).get('Range') ?? '');
+        const start = Number(range?.[1]);
+        const end = Number(range?.[2]);
+        return response(new Uint8Array(end - start + 1), {
+          contentRange: `bytes ${start}-${end}/100`,
+        });
+      });
+      const source = new FetchRangeSource({
+        sourceId: 'media-1',
+        url: 'https://plex.example/_shimweave/control/v1/range',
+        control: {
+          requestHeaders: { 'X-ShimWeave-Control-Token': 'opaque-control-token' },
+          responseUrlHeader: 'X-ShimWeave-Media-Url',
+          responseMaxAgeHeader: 'X-ShimWeave-Media-Url-Max-Age',
+        },
+        fetch,
+      });
+      return { source, calls };
+    };
+
+    it('复用期内的后续 Range 不再访问控制端点', async () => {
+      const { source, calls } = setup('60');
+      for (let i = 0; i < 3; i += 1) await source.read({ start: i * 10, end: i * 10 + 5 });
+      expect(calls.control).toBe(1);
+      expect(calls.media).toBe(3);
+      expect(new Set(calls.urls).size).toBe(1);
+    });
+
+    it('没有复用期时每块都重新换取，与旧控制端点一致', async () => {
+      for (const maxAge of [undefined, '0', 'abc', '-5']) {
+        const { source, calls } = setup(maxAge);
+        await source.read({ start: 0, end: 5 });
+        await source.read({ start: 10, end: 15 });
+        expect(calls.control).toBe(2);
+      }
+    });
+
+    it('复用期过后重新换取', async () => {
+      vi.useFakeTimers();
+      try {
+        const { source, calls } = setup('30');
+        await source.read({ start: 0, end: 5 });
+        vi.advanceTimersByTime(29_000);
+        await source.read({ start: 10, end: 15 });
+        expect(calls.control).toBe(1);
+        vi.advanceTimersByTime(2_000);
+        await source.read({ start: 20, end: 25 });
+        expect(calls.control).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('复用的地址被 CDN 拒绝时丢弃并换取新地址', async () => {
+      const { source, calls } = setup('60', (call) => (call === 2 ? 403 : 206));
+      await source.read({ start: 0, end: 5 });
+      await source.read({ start: 10, end: 15 });
+      await source.read({ start: 20, end: 25 });
+      expect(calls.control).toBe(2);
+      expect(calls.urls).toEqual([
+        'https://cdn.example/media?generation=1',
+        'https://cdn.example/media?generation=1',
+        'https://cdn.example/media?generation=2',
+        'https://cdn.example/media?generation=2',
+      ]);
+    });
+
+    it('复用期有上限', async () => {
+      vi.useFakeTimers();
+      try {
+        const { source, calls } = setup('999999');
+        await source.read({ start: 0, end: 5 });
+        vi.advanceTimersByTime(601_000);
+        await source.read({ start: 10, end: 15 });
+        expect(calls.control).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('control-v1 并发 403 只允许一个恢复 leader 先完成控制交换', async () => {
     const concurrency = 10;
     let controlCalls = 0;

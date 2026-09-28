@@ -461,6 +461,11 @@ export interface ControlledHttpRangeAccess {
   url: string;
   requestHeaders: Readonly<Record<string, string>>;
   responseUrlHeader: string;
+  /**
+   * 控制端点可用这个响应头给出媒体地址的复用秒数。缺省或无效时每次 Range 都重新换取，
+   * 与没有这个字段的旧版控制端点行为一致。
+   */
+  responseMaxAgeHeader?: string;
   expectedStatus?: number;
 }
 
@@ -488,6 +493,8 @@ export const isMediaSourceDescriptor = (value: unknown): value is MediaSourceDes
     httpUrl(value.access.url) &&
     isStringRecord(value.access.requestHeaders) &&
     boundedString(value.access.responseUrlHeader, 256) &&
+    (value.access.responseMaxAgeHeader === undefined ||
+      boundedString(value.access.responseMaxAgeHeader, 256)) &&
     (value.access.expectedStatus === undefined || httpStatus(value.access.expectedStatus))
   );
 };
