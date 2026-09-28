@@ -157,15 +157,15 @@ export const formatSubtitleUnavailable = (
 ): string => {
   if (reason === 'unsupported_codec') {
     const label = codec ? SUBTITLE_CODEC_LABELS[codec.toLowerCase()] : undefined;
-    return label ? `字幕不可用：暂不支持 ${label}` : '字幕不可用：暂不支持这种字幕格式';
+    return label ? `字幕没有显示，暂不支持 ${label}` : '字幕没有显示，暂不支持这种字幕格式';
   }
-  if (reason === 'external') return '字幕不可用：暂不支持外挂字幕';
+  if (reason === 'external') return '字幕没有显示，暂不支持外挂字幕';
   if (reason === 'mismatch' || reason === 'track_not_found') {
-    return '字幕不可用：无法确认所选字幕对应文件里的哪一条';
+    return '字幕没有显示，无法确认所选字幕对应文件里的哪一条';
   }
-  if (reason === 'unsupported_encoding') return '字幕不可用：字幕数据使用了暂不支持的编码';
-  if (reason === 'no_index') return '字幕不可用：文件缺少索引，从中途播放时无法定位字幕';
-  return '字幕不可用：读取字幕失败';
+  if (reason === 'unsupported_encoding') return '字幕没有显示，字幕数据使用了暂不支持的编码';
+  if (reason === 'no_index') return '字幕没有显示，文件缺少索引，从中途播放时无法定位字幕';
+  return '字幕没有显示，读取字幕失败';
 };
 
 const SUBTITLE_CODEC_LABELS: Readonly<Record<string, string>> = {
