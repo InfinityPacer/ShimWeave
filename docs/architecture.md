@@ -265,12 +265,24 @@ cue 统一使用原媒体绝对时间，Seek 或快速切换时按播放代次�
 ## 兼容性边界
 
 - HEVC、AV1 和 HDR 取决于 Chrome、操作系统、GPU 与具体 codec configuration。
-- Dolby Vision 必须按真实 Profile 和平台验证，不能因为 HEVC 可解码就宣称支持。
-- AC3/EAC3/DTS 转 AAC 会丢失 Atmos 或 DTS:X 对象信息。
+- Dolby Vision 必须按真实 Profile 和平台验证，不能因为 HEVC 可解码就宣称支持。Chrome 154（macOS）
+  上已验证 P8.1 与 MKV 单轨的 P7 按 HDR10 基础层播放，增强层与 RPU 被解码器忽略。P5 没有兼容
+  基础层，按 HDR10 解码颜色错误，不宣称支持。
+- AC3/EAC3/DTS/TrueHD 转 AAC 会丢失 Atmos 或 DTS:X 对象信息，当前只输出立体声。
 - PGS、VobSub、ASS/SSA、蓝光菜单、DRM/EME 不列入首版承诺。TrueHD 已按上文降级为 AAC 立体声。
 - 字幕采用独立输入与渲染接口，外挂 WebVTT/SRT 优先；内嵌字幕要等输入引擎具备可靠 cue
   读取能力后再接入，字幕失败不终止已经建立的视频会话。
 - 浏览器无法处理的视频返回明确限制，不把流量回退到 Gateway 或 NAS。
+
+后续能力的条件如下，都未排期。
+
+- **选中字幕时的提示**。字幕接入之前，Plex 里选了字幕而扩展不显示时，至少提示一次字幕暂不支持。
+- **并行 Range 预读**。外网实测串行读 4 MiB 的 Range 约折合 13 Mbps，同一线路下载速度约 35 Mbps，
+  30 Mbps 左右的原盘会边播边卡。并行两到三块预读并减少每块一次的控制请求，改动要按性能基线
+  测首帧、Seek、内存和取消。
+- **多声道 AAC**。要先实测 Chrome WebCodecs 的 5.1 AAC 编码与 MSE 多声道输出，确认后作为选项。
+- **Dolby Vision P5**。需要按 RPU 重建颜色，可行路径是 WebCodecs 解码加 WebGPU 着色器，依赖 Chrome
+  的 HDR 画布能力，属于单独的大项目。
 
 ## 站点接管与 Gateway 边界
 
