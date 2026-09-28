@@ -34,7 +34,8 @@
         color: var(--text);
         font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
       }
-      main { max-width: 560px; padding: 24px 20px 28px; }
+      /* 同一页面既是工具栏弹窗也是扩展详情里的选项页，弹窗按内容定宽，这里给出下限。 */
+      main { min-width: 380px; max-width: 560px; padding: 24px 20px 28px; }
       header { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
       header img { width: 36px; height: 36px; }
       h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: 0.01em; }
