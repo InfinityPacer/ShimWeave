@@ -131,17 +131,8 @@ export class MediabunnyMediaSession implements MediaEngineSession {
           throw new MatroskaSubtitleUnavailableError('unsupported_codec');
         }
         const layout = this.subtitleLayout;
-        // Cues 在描述阶段已被解封装器读过；只缓存成功结果，失败的下一代再试。
-        if (!this.cuePointsPromise) {
-          const pending = readMatroskaCuePoints(
-            { read: (start, end) => this.readForSubtitles(start, end, this.lifetime.signal) },
-            layout,
-          );
-          this.cuePointsPromise = pending;
-          pending.catch(() => {
-            if (this.cuePointsPromise === pending) this.cuePointsPromise = undefined;
-          });
-        }
+        // 描述阶段没能读到 Cues 时在此重试一次；只缓存成功结果。
+        this.cuePointsPromise ??= this.loadCuePoints(layout);
         const cuePoints: readonly MatroskaCuePoint[] = await this.cuePointsPromise.catch(() => []);
         const videoTrackNumber = options.videoTrackId ? Number(options.videoTrackId) : undefined;
         await extractMatroskaSubtitles({
@@ -185,6 +176,17 @@ export class MediabunnyMediaSession implements MediaEngineSession {
     this.input.dispose();
     this.closePromise = this.adapter.close();
     return this.closePromise;
+  }
+
+  private loadCuePoints(layout: MatroskaSubtitleLayout): Promise<readonly MatroskaCuePoint[]> {
+    const pending = readMatroskaCuePoints(
+      { read: (start, end) => this.readForSubtitles(start, end, this.lifetime.signal) },
+      layout,
+    );
+    pending.catch(() => {
+      if (this.cuePointsPromise === pending) this.cuePointsPromise = undefined;
+    });
+    return pending;
   }
 
   /** 字幕读取直接走底层 ByteSource，不计入视频流的覆盖区间。 */
@@ -233,6 +235,13 @@ export class MediabunnyMediaSession implements MediaEngineSession {
           : Promise.resolve(undefined),
       ]);
     this.subtitleLayout = subtitleLayout;
+    // Cues 刚被解封装器读取、仍在 Range 缓存里，趁此解析；等到起播后再读会与首个视频分片争带宽。
+    if (
+      subtitleLayout?.subtitleTracks.some((track) => RENDERABLE_SUBTITLE_CODECS.has(track.codec))
+    ) {
+      this.cuePointsPromise = this.loadCuePoints(subtitleLayout);
+      await this.cuePointsPromise.catch(() => undefined);
+    }
     const descriptor: MediaDescriptor = {
       sourceId: this.bytes.sourceId,
       sizeBytes,
