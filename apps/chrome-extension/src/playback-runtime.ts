@@ -1,18 +1,20 @@
 import type {
   AudioFallbackPolicy,
-  AudioTranscodeOutput,
   MediaDescriptor,
   MediaSourceDescriptor,
   PlanningResult,
   PlaybackIntent,
   PlaybackPlan,
   SampleCapabilityEvidence,
+  SubtitleCue,
+  SubtitleUnavailableReason,
 } from '@shimweave/contracts';
 import {
   MediaWorkerClient,
   MediaWorkerRemoteError,
   type MediaWorkerStream,
   MediaWorkerStreamCancelledError,
+  type MediaWorkerStreamOptions,
 } from './media-worker-client.js';
 import {
   MseBufferQuotaExceededError,
@@ -23,6 +25,7 @@ import {
   MseSourceBufferError,
   MseTypeUnsupportedError,
 } from './mse-controller.js';
+import { TextTrackSubtitleRenderer } from './subtitle-renderer.js';
 
 export interface BrowserPlaybackRequest {
   source: MediaSourceDescriptor;
@@ -32,12 +35,23 @@ export interface BrowserPlaybackRequest {
   selectAudioTrack?(descriptor: MediaDescriptor): string | undefined;
   audioFallback?: AudioFallbackPolicy;
   preferredSubtitleTrackId?: string;
+  /**
+   * 站点只知道自己的字幕编号时，在媒体描述完成后对应到引擎字幕轨。返回 undefined 表示字幕
+   * 关闭；无法唯一对应时返回 unavailable，运行时不会改选其他字幕。
+   */
+  selectSubtitleTrack?(descriptor: MediaDescriptor): SubtitleTrackChoice | undefined;
+  /** 选了字幕但无法显示时调用，同一次播放最多一次；视频照常播放。 */
+  onSubtitleUnavailable?(reason: SubtitleUnavailableReason, codec?: string): void;
   startSeconds?: number;
   /** 媒体描述完成后立即发布只读事实，使启动失败也能展示准确格式。 */
   onDescriptor?(descriptor: MediaDescriptor): void;
   /** 规划完成、开始缓冲之前发布计划，使音轨替换等决定不必等到起播才告知用户。 */
   onPlan?(plan: PlaybackPlan, descriptor: MediaDescriptor): void;
 }
+
+export type SubtitleTrackChoice =
+  | { trackId: string }
+  | { unavailable: SubtitleUnavailableReason; codec?: string };
 
 export interface ActiveBrowserPlayback {
   readonly descriptor: MediaDescriptor;
@@ -54,13 +68,14 @@ interface CapabilityRuntimePort {
 interface MediaWorkerPort {
   whenReady(): Promise<void>;
   describe(): Promise<MediaDescriptor>;
-  startStream(options: {
-    outputAudio?: AudioTranscodeOutput;
-    videoTrackId?: string;
-    audioTrackId?: string;
-    startSeconds?: number;
-  }): Promise<MediaWorkerStream>;
+  startStream(options: MediaWorkerStreamOptions): Promise<MediaWorkerStream>;
   close(): Promise<void>;
+}
+
+interface SubtitleRendererPort {
+  reset(): void;
+  add(cues: readonly SubtitleCue[]): void;
+  dispose(): void;
 }
 
 interface MseControllerPort {
@@ -72,6 +87,10 @@ export interface BrowserPlaybackRuntimeOptions {
   capabilities: CapabilityRuntimePort;
   createWorker?: (source: MediaSourceDescriptor) => MediaWorkerPort;
   createMseController?: (mediaElement: HTMLMediaElement) => MseControllerPort;
+  createSubtitleRenderer?: (
+    mediaElement: HTMLMediaElement,
+    language: string | undefined,
+  ) => SubtitleRendererPort;
   now?: () => number;
   steadyPlaybackSeconds?: number;
 }
@@ -99,6 +118,9 @@ export class BrowserPlaybackRuntime {
   private readonly createMseController: NonNullable<
     BrowserPlaybackRuntimeOptions['createMseController']
   >;
+  private readonly createSubtitleRenderer: NonNullable<
+    BrowserPlaybackRuntimeOptions['createSubtitleRenderer']
+  >;
   private readonly now: () => number;
   private readonly steadyPlaybackSeconds: number;
   private generation = 0;
@@ -116,6 +138,13 @@ export class BrowserPlaybackRuntime {
     this.createMseController =
       options.createMseController ??
       ((mediaElement) => new MsePlaybackController({ mediaElement }));
+    this.createSubtitleRenderer =
+      options.createSubtitleRenderer ??
+      ((mediaElement, language) =>
+        new TextTrackSubtitleRenderer({
+          mediaElement,
+          ...(language ? { language } : {}),
+        }));
     this.now = options.now ?? Date.now;
     this.steadyPlaybackSeconds = options.steadyPlaybackSeconds ?? 5;
     if (!Number.isFinite(this.steadyPlaybackSeconds) || this.steadyPlaybackSeconds <= 0) {
@@ -144,19 +173,34 @@ export class BrowserPlaybackRuntime {
       request.onDescriptor?.(descriptor);
       const preferredAudioTrackId =
         request.preferredAudioTrackId ?? request.selectAudioTrack?.(descriptor);
+      let subtitleReported = false;
+      const reportSubtitleUnavailable = (reason: SubtitleUnavailableReason, codec?: string) => {
+        if (subtitleReported || generation !== this.generation) return;
+        subtitleReported = true;
+        request.onSubtitleUnavailable?.(reason, codec);
+      };
+      const subtitleChoice = request.preferredSubtitleTrackId
+        ? { trackId: request.preferredSubtitleTrackId }
+        : request.selectSubtitleTrack?.(descriptor);
+      if (subtitleChoice && 'unavailable' in subtitleChoice) {
+        reportSubtitleUnavailable(subtitleChoice.unavailable, subtitleChoice.codec);
+      }
+      const preferredSubtitleTrackId =
+        subtitleChoice && 'trackId' in subtitleChoice ? subtitleChoice.trackId : undefined;
       const result = await this.capabilities.plan({
         media: descriptor,
         nativeSourceUrlAvailable: request.source.nativePlaybackUrl !== undefined,
         ...(preferredAudioTrackId ? { preferredAudioTrackId } : {}),
         ...(request.audioFallback ? { audioFallback: request.audioFallback } : {}),
-        ...(request.preferredSubtitleTrackId
-          ? { preferredSubtitleTrackId: request.preferredSubtitleTrackId }
-          : {}),
+        ...(preferredSubtitleTrackId ? { preferredSubtitleTrackId } : {}),
         ...(request.startSeconds !== undefined ? { startSeconds: request.startSeconds } : {}),
       });
       this.assertCurrent(generation);
       const plan = executablePlan(result);
       request.onPlan?.(plan, descriptor);
+      if (plan.subtitleUnavailable) {
+        reportSubtitleUnavailable(plan.subtitleUnavailable.reason, plan.subtitleUnavailable.codec);
+      }
       const observer = new PlaybackEvidenceObserver({
         mediaElement: request.mediaElement,
         plan,
@@ -168,7 +212,14 @@ export class BrowserPlaybackRuntime {
       const state =
         plan.strategy === 'native'
           ? await this.startNative(pending, request, descriptor, plan, observer)
-          : await this.startMse(pending, request, descriptor, plan, observer);
+          : await this.startMse(
+              pending,
+              request,
+              descriptor,
+              plan,
+              observer,
+              reportSubtitleUnavailable,
+            );
       this.assertCurrent(generation);
       if (this.pending === pending) this.pending = undefined;
       this.active = state;
@@ -239,22 +290,47 @@ export class BrowserPlaybackRuntime {
     descriptor: MediaDescriptor,
     plan: PlaybackPlan,
     observer: PlaybackEvidenceObserver,
+    reportSubtitleUnavailable: (reason: SubtitleUnavailableReason) => void,
   ): Promise<ActivePlaybackState> {
     const worker = pending.worker;
     const closeWorker = pending.release;
-    const streamOptions = (startSeconds: number | undefined) => ({
-      videoTrackId: plan.videoTrackId,
-      ...(plan.audioTrackId ? { audioTrackId: plan.audioTrackId } : {}),
-      ...(plan.outputAudio ? { outputAudio: plan.outputAudio } : {}),
-      ...(startSeconds !== undefined ? { startSeconds } : {}),
-    });
+    const subtitleTrackId = plan.subtitleTrackId;
+    const subtitleTrack = descriptor.tracks.find((track) => track.id === subtitleTrackId);
+    const subtitles = subtitleTrackId
+      ? this.createSubtitleRenderer(request.mediaElement, subtitleTrack?.language)
+      : undefined;
+    let subtitleGeneration = 0;
+    let released = false;
+    // 每次建流都是新的字幕代次：清掉旧 cue，迟到的旧代 cue 不得写入。
+    const streamOptions = (startSeconds: number | undefined): MediaWorkerStreamOptions => {
+      const generation = ++subtitleGeneration;
+      subtitles?.reset();
+      return {
+        videoTrackId: plan.videoTrackId,
+        ...(plan.audioTrackId ? { audioTrackId: plan.audioTrackId } : {}),
+        ...(plan.outputAudio ? { outputAudio: plan.outputAudio } : {}),
+        ...(startSeconds !== undefined ? { startSeconds } : {}),
+        ...(subtitles && subtitleTrackId
+          ? {
+              subtitleTrackId,
+              onSubtitleCues: (cues: readonly SubtitleCue[]) => {
+                if (!released && generation === subtitleGeneration) subtitles.add(cues);
+              },
+              onSubtitleUnavailable: (reason: SubtitleUnavailableReason) => {
+                if (!released && generation === subtitleGeneration) {
+                  reportSubtitleUnavailable(reason);
+                }
+              },
+            }
+          : {}),
+      };
+    };
     const stream = await worker.startStream(streamOptions(request.startSeconds));
     this.assertCurrent(pending.generation);
     const initialController = this.createMseController(request.mediaElement);
     let controller: MseControllerPort | undefined = initialController;
     let desiredSeekSeconds: number | undefined;
     let seekLoop: Promise<void> | undefined;
-    let released = false;
     let suppressSeekEvents = false;
 
     const observeCompletion = (playback: MsePlaybackSession): void => {
@@ -318,6 +394,7 @@ export class BrowserPlaybackRuntime {
       desiredSeekSeconds = undefined;
       request.mediaElement.removeEventListener('seeking', onSeeking);
       observer.stop();
+      subtitles?.dispose();
       await Promise.allSettled([controller?.stop(), closeWorker()]);
       await seekLoop?.catch(() => undefined);
     });

@@ -2,6 +2,8 @@ import type {
   AudioTranscodeOutput,
   MediaDescriptor,
   MediaSourceDescriptor,
+  SubtitleCue,
+  SubtitleUnavailableReason,
 } from '@shimweave/contracts';
 import type { RangeLeasePort } from '@shimweave/core';
 
@@ -29,6 +31,8 @@ export interface MediaWorkerStartStreamMessage {
   outputAudio?: AudioTranscodeOutput;
   videoTrackId?: string;
   audioTrackId?: string;
+  /** 与本次视频流同代读取的内嵌字幕；字幕失败只回报 subtitle-unavailable，不结束视频流。 */
+  subtitleTrackId?: string;
   startSeconds?: number;
 }
 
@@ -97,6 +101,21 @@ export interface MediaWorkerStreamCompleteMessage {
   requestId: string;
 }
 
+/** 字幕 cue 按簇批量回传，不占用媒体块的确认通道。 */
+export interface MediaWorkerSubtitleCuesMessage {
+  protocol: typeof MEDIA_WORKER_PROTOCOL;
+  type: 'subtitle-cues';
+  requestId: string;
+  cues: readonly SubtitleCue[];
+}
+
+export interface MediaWorkerSubtitleUnavailableMessage {
+  protocol: typeof MEDIA_WORKER_PROTOCOL;
+  type: 'subtitle-unavailable';
+  requestId: string;
+  reason: SubtitleUnavailableReason;
+}
+
 export interface MediaWorkerErrorMessage {
   protocol: typeof MEDIA_WORKER_PROTOCOL;
   type: 'error';
@@ -122,5 +141,7 @@ export type MediaWorkerHostMessage =
   | MediaWorkerStreamReadyMessage
   | MediaWorkerStreamChunkMessage
   | MediaWorkerStreamCompleteMessage
+  | MediaWorkerSubtitleCuesMessage
+  | MediaWorkerSubtitleUnavailableMessage
   | MediaWorkerErrorMessage
   | MediaWorkerClosedMessage;

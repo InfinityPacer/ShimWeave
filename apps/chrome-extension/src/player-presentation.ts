@@ -1,4 +1,9 @@
-import type { AudioMediaTrack, MediaDescriptor, VideoMediaTrack } from '@shimweave/contracts';
+import type {
+  AudioMediaTrack,
+  MediaDescriptor,
+  SubtitleUnavailableReason,
+  VideoMediaTrack,
+} from '@shimweave/contracts';
 
 export interface PlaybackFailurePresentation {
   code: string;
@@ -143,6 +148,34 @@ const displayLanguage = (code: string | undefined, locale: string): string | und
   } catch {
     return code;
   }
+};
+
+/** 字幕不可用提示只说明原因类别，不暴露轨道编号或文件信息。 */
+export const formatSubtitleUnavailable = (
+  reason: SubtitleUnavailableReason,
+  codec?: string,
+): string => {
+  if (reason === 'unsupported_codec') {
+    const label = codec ? SUBTITLE_CODEC_LABELS[codec.toLowerCase()] : undefined;
+    return label ? `字幕不可用：暂不支持 ${label}` : '字幕不可用：暂不支持这种字幕格式';
+  }
+  if (reason === 'external') return '字幕不可用：暂不支持外挂字幕';
+  if (reason === 'mismatch' || reason === 'track_not_found') {
+    return '字幕不可用：无法确认所选字幕对应文件里的哪一条';
+  }
+  if (reason === 'unsupported_encoding') return '字幕不可用：字幕数据使用了暂不支持的编码';
+  if (reason === 'no_index') return '字幕不可用：文件缺少索引，从中途播放时无法定位字幕';
+  return '字幕不可用：读取字幕失败';
+};
+
+const SUBTITLE_CODEC_LABELS: Readonly<Record<string, string>> = {
+  pgs: 'PGS 图形字幕',
+  hdmv_pgs_subtitle: 'PGS 图形字幕',
+  vobsub: 'VobSub 图形字幕',
+  dvd_subtitle: 'VobSub 图形字幕',
+  dvb_subtitle: 'DVB 图形字幕',
+  ass: 'ASS 字幕',
+  ssa: 'SSA 字幕',
 };
 
 /** 页面错误提示只使用媒体结构事实，不暴露源地址、文件名或内部轨道标识。 */

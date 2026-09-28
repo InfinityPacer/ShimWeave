@@ -5,6 +5,9 @@ import type {
   MediaEngineSession,
   MediaFragmentStream,
   MediaFragmentStreamOptions,
+  MediaSubtitleStream,
+  SubtitleCueSink,
+  SubtitleUnavailableReason,
 } from '@shimweave/contracts';
 import { isMediaSourceDescriptor } from '@shimweave/contracts';
 import {
@@ -31,6 +34,11 @@ const STREAM_READ_AHEAD_BYTES = 4 * 1024 * 1024;
  * 并行预取实测无益，外网到源站的总吞吐封顶，多开的连接只是分掉同一份带宽。
  */
 const STREAM_CACHE_BYTES = 48 * 1024 * 1024;
+/**
+ * 视频流读完后给字幕读取器留出的收尾时间。字幕只解析视频已读过的簇，通常早已跟上；
+ * 文件末尾的 Cues 等元素不会被视频流读取，字幕读取器会一直等待，到时即取消。
+ */
+const SUBTITLE_DRAIN_MS = 500;
 
 interface SchedulerRuntime {
   mode: 'shared' | 'local';
@@ -43,6 +51,7 @@ interface ActiveStream {
   sink: WorkerFragmentSink;
   cancelled: boolean;
   stream?: MediaFragmentStream;
+  subtitles?: MediaSubtitleStream | undefined;
   completion: Promise<void>;
 }
 
@@ -85,12 +94,16 @@ export class DedicatedMediaWorkerHost {
       return;
     }
     if (value.type === 'start-stream') {
-      this.startStream(value.requestId, {
-        ...(value.outputAudio ? { outputAudio: value.outputAudio } : {}),
-        ...(value.videoTrackId ? { videoTrackId: value.videoTrackId } : {}),
-        ...(value.audioTrackId ? { audioTrackId: value.audioTrackId } : {}),
-        ...(value.startSeconds !== undefined ? { startSeconds: value.startSeconds } : {}),
-      });
+      this.startStream(
+        value.requestId,
+        {
+          ...(value.outputAudio ? { outputAudio: value.outputAudio } : {}),
+          ...(value.videoTrackId ? { videoTrackId: value.videoTrackId } : {}),
+          ...(value.audioTrackId ? { audioTrackId: value.audioTrackId } : {}),
+          ...(value.startSeconds !== undefined ? { startSeconds: value.startSeconds } : {}),
+        },
+        value.subtitleTrackId,
+      );
       return;
     }
     if (value.type === 'append-ack') {
@@ -163,7 +176,11 @@ export class DedicatedMediaWorkerHost {
     }
   }
 
-  private startStream(requestId: string, options: MediaFragmentStreamOptions): void {
+  private startStream(
+    requestId: string,
+    options: MediaFragmentStreamOptions,
+    subtitleTrackId?: string,
+  ): void {
     if (!this.mediaSession || this.closing) {
       this.sendError('not_ready', 'Media worker is not ready', requestId);
       return;
@@ -184,12 +201,13 @@ export class DedicatedMediaWorkerHost {
       completion: Promise.resolve(),
     };
     this.activeStream = active;
-    active.completion = this.runStream(active, options);
+    active.completion = this.runStream(active, options, subtitleTrackId);
   }
 
   private async runStream(
     active: ActiveStream,
     options: MediaFragmentStreamOptions,
+    subtitleTrackId: string | undefined,
   ): Promise<void> {
     let failed = false;
     const mediaSession = this.mediaSession;
@@ -199,6 +217,9 @@ export class DedicatedMediaWorkerHost {
           outputAudio: options.outputAudio,
           ...(options.audioTrackId ? { audioTrackId: options.audioTrackId } : {}),
         });
+      }
+      if (subtitleTrackId && !active.cancelled) {
+        active.subtitles = this.startSubtitles(active, mediaSession, options, subtitleTrackId);
       }
       const stream = await mediaSession?.startFragmentStream(active.sink, options);
       if (!stream) throw new Error('Media session is unavailable');
@@ -222,6 +243,9 @@ export class DedicatedMediaWorkerHost {
       });
       await active.sink.activate();
       await stream.completion;
+      if (active.subtitles && !active.cancelled && !this.closing) {
+        await Promise.race([active.subtitles.completion, delay(SUBTITLE_DRAIN_MS)]);
+      }
     } catch (error) {
       failed = !active.cancelled && !this.closing;
       if (failed) {
@@ -231,6 +255,7 @@ export class DedicatedMediaWorkerHost {
         }
       }
     } finally {
+      await active.subtitles?.cancel().catch(() => undefined);
       active.sink.abort();
       if (this.activeStream === active) this.activeStream = undefined;
       if (!failed && !active.cancelled && !this.closing) {
@@ -240,6 +265,52 @@ export class DedicatedMediaWorkerHost {
           requestId: active.requestId,
         });
       }
+    }
+  }
+
+  /** 字幕与视频流同代启动，必须先于视频开始读取，失败只回报不可用。 */
+  private startSubtitles(
+    active: ActiveStream,
+    mediaSession: MediaEngineSession | undefined,
+    options: MediaFragmentStreamOptions,
+    trackId: string,
+  ): MediaSubtitleStream | undefined {
+    const post = (message: MediaWorkerHostMessage): void => {
+      if (active.cancelled || this.closing || this.activeStream !== active) return;
+      this.postMessage(message);
+    };
+    const unavailable = (reason: SubtitleUnavailableReason): void =>
+      post({
+        protocol: MEDIA_WORKER_PROTOCOL,
+        type: 'subtitle-unavailable',
+        requestId: active.requestId,
+        reason,
+      });
+    if (!mediaSession?.startSubtitleStream) {
+      unavailable('unsupported_codec');
+      return undefined;
+    }
+    try {
+      return mediaSession.startSubtitleStream(
+        {
+          cues: (cues) =>
+            post({
+              protocol: MEDIA_WORKER_PROTOCOL,
+              type: 'subtitle-cues',
+              requestId: active.requestId,
+              cues,
+            }),
+          fail: unavailable,
+        },
+        {
+          trackId,
+          ...(options.startSeconds !== undefined ? { startSeconds: options.startSeconds } : {}),
+          ...(options.videoTrackId ? { videoTrackId: options.videoTrackId } : {}),
+        },
+      );
+    } catch {
+      unavailable('read_failed');
+      return undefined;
     }
   }
 
@@ -255,6 +326,7 @@ export class DedicatedMediaWorkerHost {
     active.cancelled = true;
     active.sink.abort(new MediaWorkerStreamCancelledError());
     await Promise.allSettled([
+      active.subtitles?.cancel(),
       active.stream?.cancel(),
       active.stream ? undefined : this.rebuildMediaSession(mediaSession),
       active.completion,
@@ -282,6 +354,7 @@ export class DedicatedMediaWorkerHost {
       activeStream.sink.abort(new MediaWorkerStreamCancelledError());
     }
     await Promise.allSettled([
+      activeStream?.subtitles?.cancel(),
       activeStream?.stream?.cancel(),
       mediaSession?.close(),
       schedulerRuntime?.close(),
@@ -367,11 +440,25 @@ const createMediaSession = async (
       broker.setReadAheadBytes(STREAM_READ_AHEAD_BYTES);
       return mediaSession.startFragmentStream(sink, options);
     },
+    ...(mediaSession.startSubtitleStream
+      ? {
+          startSubtitleStream: (sink, options) =>
+            mediaSession.startSubtitleStream?.(sink, options) ?? unsupportedSubtitleStream(sink),
+        }
+      : {}),
     close: async () => {
       await Promise.allSettled([mediaSession.close(), rangeSession.close()]);
     },
   };
 };
+
+const unsupportedSubtitleStream = (sink: SubtitleCueSink): MediaSubtitleStream => {
+  sink.fail('unsupported_codec');
+  return { completion: Promise.resolve(), cancel: () => Promise.resolve() };
+};
+
+const delay = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 const createDefaultScheduler = async (
   message: MediaWorkerInitMessage,
@@ -447,6 +534,7 @@ const isClientMessage = (value: unknown): value is MediaWorkerClientMessage => {
       (value.outputAudio === undefined || isAudioTranscodeOutput(value.outputAudio)) &&
       (value.videoTrackId === undefined || nonEmptyString(value.videoTrackId)) &&
       (value.audioTrackId === undefined || nonEmptyString(value.audioTrackId)) &&
+      (value.subtitleTrackId === undefined || nonEmptyString(value.subtitleTrackId)) &&
       (value.startSeconds === undefined || finiteNonNegativeNumber(value.startSeconds))
     );
   }
