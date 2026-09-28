@@ -8,8 +8,7 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "wasm",
-    "LICENSE.FFmpeg.md"
+    "wasm"
   ],
   "scripts": {
     "build": "tsc -b",

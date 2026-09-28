@@ -75,10 +75,21 @@ await Promise.all([
     sourcemap: true,
     splitting: true,
     chunkNames: 'chunks/[name]-[hash]',
+    // TrueHD 解码器把 WASM 内联成字符串，utf8 输出避免 esbuild 把控制字符转义成更长的形式。
+    charset: 'utf8',
   }),
 ]);
 
 await Promise.all([
   cp(resolve(applicationRoot, 'public'), outputRoot, { recursive: true }),
   cp(resolve(repositoryRoot, 'LICENSE'), resolve(outputRoot, 'LICENSE')),
+  // TrueHD 解码使用 FFmpeg（LGPL-2.1+），随扩展附带其许可与来源说明。
+  cp(
+    resolve(repositoryRoot, 'packages/codec-truehd/wasm/NOTICE.FFmpeg.md'),
+    resolve(outputRoot, 'licenses/FFmpeg.md'),
+  ),
+  cp(
+    resolve(repositoryRoot, 'packages/codec-truehd/wasm/COPYING.LGPLv2.1'),
+    resolve(outputRoot, 'licenses/COPYING.LGPLv2.1'),
+  ),
 ]);

@@ -42,6 +42,8 @@ const DEFAULT_TRANSFORMS: readonly CodecTransform[] = [
   createAacFallback('ac3'),
   createAacFallback('eac3'),
   createAacFallback('dts'),
+  // Mediabunny 不认识 TrueHD，媒体描述里记为 Matroska CodecID 的小写形式。
+  createAacFallback('a_truehd'),
 ];
 
 /**

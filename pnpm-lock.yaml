@@ -76,6 +76,9 @@ importers:
       '@mediabunny/dts':
         specifier: 1.55.5
         version: 1.55.5(mediabunny@1.55.5)
+      '@shimweave/codec-truehd':
+        specifier: workspace:*
+        version: link:../codec-truehd
       '@shimweave/contracts':
         specifier: workspace:*
         version: link:../contracts
