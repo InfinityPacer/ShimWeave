@@ -1,0 +1,23 @@
+{
+  "name": "@shimweave/codec-truehd",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "wasm",
+    "LICENSE.FFmpeg.md"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "build:fixture": "bash scripts/build-fixture.sh"
+  },
+  "devDependencies": {
+    "mediabunny": "1.55.5"
+  }
+}
