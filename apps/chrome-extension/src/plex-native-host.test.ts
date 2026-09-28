@@ -282,6 +282,49 @@ describe('PlexNativePlaybackHost', () => {
     await host.dispose();
   });
 
+  it('Plex 重复发出同一播放请求时，页面用旧通知发起的接管仍然成立', async () => {
+    const media = new TestMediaElement();
+    const start = vi.fn(async (_request: BrowserPlaybackRequest) =>
+      activePlayback(
+        vi.fn(async () => undefined),
+        new Promise<void>(() => undefined),
+      ),
+    );
+    const postMessage = vi.fn();
+    const releaseNotice = vi.fn();
+    const noticeIds = ['notice_id_1234567890', 'notice_id_0987654321'];
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({ start, stop: vi.fn(async () => undefined) }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage,
+      readStartSeconds: () => undefined,
+      createNoticeId: () => noticeIds.shift() ?? 'notice_id_unexpected00',
+      releaseNotice,
+    });
+    host.acceptRuntimeMessage(started('request-1', 'playback-1', 'source-1'));
+    host.acceptRuntimeMessage(control('request-1', 'playback-1', 'source-1'));
+    host.acceptRuntimeMessage(started('request-2', 'playback-1', 'source-1'));
+    const repeated = control('request-2', 'playback-1', 'source-1');
+    host.acceptRuntimeMessage(repeated);
+    host.acceptPageMessage({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-start',
+      requestKey: repeated.requestKey,
+      noticeId: 'notice_id_1234567890',
+      sessionId: 'native_session_1234567890',
+    });
+    await flush();
+
+    expect(postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'takeover-error' }),
+    );
+    expect(start).toHaveBeenCalledOnce();
+    expect(start.mock.calls[0]?.[0]).toMatchObject({ source: repeated.source });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'takeover-ready' }));
+    await host.dispose();
+  });
+
   it('读取音轨选择失败时按默认音轨和严格策略起播', async () => {
     const media = new TestMediaElement();
     const start = vi.fn(async (_request: BrowserPlaybackRequest) =>
