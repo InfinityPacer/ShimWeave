@@ -185,6 +185,24 @@ describe('extractMatroskaSubtitles', () => {
     expect(run.cues.map((cue) => cue.text)).toEqual(['<i>第二句</i>', '没有时长']);
   });
 
+  it('簇头读过而数据没被重读、下一个簇已读时跳过该簇，不停在原地', async () => {
+    const file = buildFile();
+    const run = await extraction(file);
+    // 解封装器复用描述阶段缓存的第一个簇：本代只重读了它的簇头，随后读了第二个簇。
+    run.coverage.add(at(file.clusterPositions, 0), at(file.clusterPositions, 0) + 16);
+    run.coverage.add(at(file.clusterPositions, 1), file.bytes.length);
+
+    await run.completion;
+
+    expect(run.cues.map((cue) => cue.text)).toEqual(['<i>第二句</i>', '没有时长']);
+    expect(
+      run.reads.every(
+        ([start]) =>
+          start >= at(file.clusterPositions, 1) || start === at(file.clusterPositions, 0),
+      ),
+    ).toBe(true);
+  });
+
   it('解开 zlib 与头部剥离编码的负载', async () => {
     const zlibPayloads = new Map<string, Uint8Array>();
     for (const value of ['第一句', '{\\an8}<i>第二句</i>', '没有时长']) {

@@ -464,11 +464,21 @@ export const extractMatroskaSubtitles = async (options: MatroskaSubtitleExtracti
     (left, right) => left - right,
   );
 
-  const waitForCoverage = async (start: number, end: number): Promise<boolean> => {
+  /**
+   * 等待 [start, end) 被视频流读过。返回 false 表示已改到新位置：当前位置整段没被读、而索引里
+   * 更靠后的簇已被读过时，按索引重新对齐；簇头读过但数据没被读、下一个元素却已被读时，说明
+   * 解封装器复用了它在更早代次（例如描述阶段）自行缓存的簇，跳过这个簇而不去读未覆盖的字节。
+   */
+  const waitForCoverage = async (start: number, end: number, elementEnd?: number) => {
     while (!coverage.covers(start, end)) {
-      const next = coverage.firstCoveredAfter(start, resyncPositions);
-      if (next !== undefined && !coverage.covers(start, start + 1)) {
-        position = next;
+      if (!coverage.covers(start, start + 1)) {
+        const next = coverage.firstCoveredAfter(start, resyncPositions);
+        if (next !== undefined) {
+          position = next;
+          return false;
+        }
+      } else if (elementEnd !== undefined && coverage.covers(elementEnd, elementEnd + 1)) {
+        position = elementEnd;
         return false;
       }
       await coverage.changed(signal);
@@ -487,7 +497,7 @@ export const extractMatroskaSubtitles = async (options: MatroskaSubtitleExtracti
     const dataEnd = position + header.dataEnd;
     // 簇之后的 Cues、Tags 等元素说明簇已结束。
     if (header.id !== ID.cluster) return;
-    if (!(await waitForCoverage(position, dataEnd))) continue;
+    if (!(await waitForCoverage(position, dataEnd, dataEnd))) continue;
     const cues = await scanCluster(options, format, dataStart, dataEnd, scaleSeconds);
     if (cues.length > 0 && !signal.aborted) options.sink.cues(cues);
     position = dataEnd;
