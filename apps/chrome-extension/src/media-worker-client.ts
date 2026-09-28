@@ -2,6 +2,8 @@ import type {
   AudioTranscodeOutput,
   MediaDescriptor,
   MediaSourceDescriptor,
+  SubtitleCue,
+  SubtitleUnavailableReason,
 } from '@shimweave/contracts';
 import { createExtensionFrameWorker } from './extension-worker-bridge.js';
 import {
@@ -40,6 +42,10 @@ export interface MediaWorkerStreamOptions {
   audioTrackId?: string;
   /** 非零值会从关键帧重建 fMP4/MSE 时间轴，不触发视频转码。 */
   startSeconds?: number;
+  /** 与本次视频流同代读取的内嵌字幕，cue 与失败只通过下面两个回调交付。 */
+  subtitleTrackId?: string;
+  onSubtitleCues?(cues: readonly SubtitleCue[]): void;
+  onSubtitleUnavailable?(reason: SubtitleUnavailableReason): void;
 }
 
 export interface MediaWorkerStreamChunk {
@@ -61,6 +67,8 @@ export interface MediaWorkerStream {
 
 interface StreamState {
   requestId: string;
+  onSubtitleCues?: MediaWorkerStreamOptions['onSubtitleCues'];
+  onSubtitleUnavailable?: MediaWorkerStreamOptions['onSubtitleUnavailable'];
   ready: Deferred<MediaWorkerStream>;
   completion: Deferred<void>;
   queuedChunk?: { chunkId: string; bytes: ArrayBuffer };
@@ -167,6 +175,10 @@ export class MediaWorkerClient {
       completion: createDeferred<void>(),
       cancelled: false,
       ended: false,
+      ...(options.onSubtitleCues ? { onSubtitleCues: options.onSubtitleCues } : {}),
+      ...(options.onSubtitleUnavailable
+        ? { onSubtitleUnavailable: options.onSubtitleUnavailable }
+        : {}),
     };
     void state.completion.promise.catch(() => undefined);
     this.activeStream = state;
@@ -177,6 +189,7 @@ export class MediaWorkerClient {
       ...(options.outputAudio ? { outputAudio: options.outputAudio } : {}),
       ...(options.videoTrackId ? { videoTrackId: options.videoTrackId } : {}),
       ...(options.audioTrackId ? { audioTrackId: options.audioTrackId } : {}),
+      ...(options.subtitleTrackId ? { subtitleTrackId: options.subtitleTrackId } : {}),
       ...(options.startSeconds !== undefined ? { startSeconds: options.startSeconds } : {}),
     });
     return state.ready.promise;
@@ -248,6 +261,16 @@ export class MediaWorkerClient {
     }
     if (value.type === 'stream-complete') {
       this.completeStream(value.requestId);
+      return;
+    }
+    if (value.type === 'subtitle-cues' || value.type === 'subtitle-unavailable') {
+      const state = this.activeStream;
+      if (!state || state.requestId !== value.requestId || state.ended || state.cancelled) return;
+      // 字幕回调属于页面渲染，异常不能影响媒体流。
+      try {
+        if (value.type === 'subtitle-cues') state.onSubtitleCues?.(value.cues);
+        else state.onSubtitleUnavailable?.(value.reason);
+      } catch {}
       return;
     }
     const error = new MediaWorkerRemoteError(value.code, value.message);
@@ -508,6 +531,17 @@ const isHostMessage = (value: unknown): value is MediaWorkerHostMessage => {
     );
   }
   if (value.type === 'stream-complete') return nonEmptyString(value.requestId);
+  if (value.type === 'subtitle-cues') {
+    return (
+      nonEmptyString(value.requestId) &&
+      Array.isArray(value.cues) &&
+      value.cues.length <= MAX_SUBTITLE_CUES_PER_MESSAGE &&
+      value.cues.every(isSubtitleCue)
+    );
+  }
+  if (value.type === 'subtitle-unavailable') {
+    return nonEmptyString(value.requestId) && SUBTITLE_UNAVAILABLE_REASONS.has(value.reason);
+  }
   if (value.type === 'error') {
     return (
       nonEmptyString(value.code) &&
@@ -517,6 +551,28 @@ const isHostMessage = (value: unknown): value is MediaWorkerHostMessage => {
   }
   return false;
 };
+
+const MAX_SUBTITLE_CUES_PER_MESSAGE = 4096;
+const MAX_SUBTITLE_TEXT_LENGTH = 4096;
+
+const SUBTITLE_UNAVAILABLE_REASONS: ReadonlySet<unknown> = new Set<SubtitleUnavailableReason>([
+  'mismatch',
+  'external',
+  'track_not_found',
+  'unsupported_codec',
+  'unsupported_encoding',
+  'no_index',
+  'read_failed',
+]);
+
+const isSubtitleCue = (value: unknown): value is SubtitleCue =>
+  isRecord(value) &&
+  finiteNonNegativeNumber(value.startSeconds) &&
+  finiteNonNegativeNumber(value.endSeconds) &&
+  value.endSeconds > value.startSeconds &&
+  typeof value.text === 'string' &&
+  value.text.length <= MAX_SUBTITLE_TEXT_LENGTH &&
+  (value.placement === undefined || value.placement === 'top');
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;

@@ -4,6 +4,7 @@ import type {
   MediaEngineProvider,
   MediaEngineSession,
   MediaFragmentSink,
+  SubtitleCueSink,
 } from '@shimweave/contracts';
 import { RangeScheduler } from '@shimweave/core';
 import { RangeProtocolError } from '@shimweave/io-fetch';
@@ -665,6 +666,137 @@ describe('DedicatedMediaWorkerHost', () => {
 const directSource = (url = 'https://cdn.example/media') => ({
   sourceId: 'stable-source',
   access: { kind: 'direct-http-range' as const, url },
+});
+
+describe('DedicatedMediaWorkerHost 字幕', () => {
+  const setup = async () => {
+    const messages: MediaWorkerHostMessage[] = [];
+    const scheduler = new RangeScheduler();
+    const order: string[] = [];
+    let subtitleSink: SubtitleCueSink | undefined;
+    const cancelSubtitles = vi.fn(async () => undefined);
+    const startSubtitleStream = vi.fn((sink: SubtitleCueSink) => {
+      order.push('subtitles');
+      subtitleSink = sink;
+      return { completion: new Promise<void>(() => undefined), cancel: cancelSubtitles };
+    });
+    const conversion = deferred<void>();
+    const cancelStream = vi.fn(async () => conversion.resolve(undefined));
+    const host = new DedicatedMediaWorkerHost({
+      postMessage: (message) => messages.push(message),
+      createScheduler: async () => ({
+        mode: 'local',
+        scheduler,
+        close: () => scheduler.close(),
+      }),
+      mediaEngine: testEngine(() => ({
+        describe: async () => descriptor,
+        startSubtitleStream,
+        startFragmentStream: async () => {
+          order.push('video');
+          return {
+            mimeType: 'video/mp4',
+            timelineOffsetSeconds: 0,
+            initialPositionSeconds: 0,
+            completion: conversion.promise,
+            cancel: cancelStream,
+          };
+        },
+        close: async () => undefined,
+      })),
+    });
+    host.receive({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'init',
+      sessionId: 'session',
+      source: directSource(),
+    });
+    await flush();
+    return {
+      messages,
+      host,
+      order,
+      startSubtitleStream,
+      cancelSubtitles,
+      cancelStream,
+      sink: () => {
+        if (!subtitleSink) throw new Error('subtitle stream not started');
+        return subtitleSink;
+      },
+    };
+  };
+
+  it('字幕先于视频流启动并使用同一起点，cue 与失败分别回传', async () => {
+    const run = await setup();
+    run.host.receive({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'start-stream',
+      requestId: 'stream',
+      videoTrackId: '1',
+      subtitleTrackId: '3',
+      startSeconds: 42,
+    });
+    await flush();
+
+    expect(run.order).toEqual(['subtitles', 'video']);
+    expect(run.startSubtitleStream).toHaveBeenCalledWith(expect.anything(), {
+      trackId: '3',
+      startSeconds: 42,
+      videoTrackId: '1',
+    });
+    const cues = [{ startSeconds: 43, endSeconds: 44, text: '字幕' }];
+    run.sink().cues(cues);
+    run.sink().fail('read_failed');
+
+    expect(run.messages).toContainEqual({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'subtitle-cues',
+      requestId: 'stream',
+      cues,
+    });
+    expect(run.messages).toContainEqual({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'subtitle-unavailable',
+      requestId: 'stream',
+      reason: 'read_failed',
+    });
+    expect(run.messages).not.toContainEqual(expect.objectContaining({ type: 'error' }));
+    expect(run.cancelStream).not.toHaveBeenCalled();
+    await run.host.close();
+    expect(run.cancelSubtitles).toHaveBeenCalled();
+  });
+
+  it('取消视频流时一并取消字幕，之后的 cue 不再回传', async () => {
+    const run = await setup();
+    run.host.receive({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'start-stream',
+      requestId: 'stream',
+      subtitleTrackId: '3',
+    });
+    await flush();
+    run.host.receive({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'cancel-stream',
+      requestId: 'stream',
+    });
+    await waitFor(() => run.messages.some((message) => message.type === 'stream-complete'));
+
+    expect(run.cancelSubtitles).toHaveBeenCalled();
+    run.sink().cues([{ startSeconds: 1, endSeconds: 2, text: '迟到' }]);
+    expect(run.messages).not.toContainEqual(expect.objectContaining({ type: 'subtitle-cues' }));
+    await run.host.close();
+  });
+
+  it('没有选字幕时不启动字幕读取', async () => {
+    const run = await setup();
+    run.host.receive({ protocol: MEDIA_WORKER_PROTOCOL, type: 'start-stream', requestId: 'plain' });
+    await flush();
+
+    expect(run.startSubtitleStream).not.toHaveBeenCalled();
+    expect(run.order).toEqual(['video']);
+    await run.host.close();
+  });
 });
 
 type TestMediaSession = Omit<MediaEngineSession, 'prepareCodecs'> &

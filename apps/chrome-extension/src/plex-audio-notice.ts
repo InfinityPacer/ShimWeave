@@ -12,19 +12,31 @@ export class PlexAudioNotice {
   private element: HTMLElement | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(document: Document) {
+  private readonly top: string;
+
+  /** top 用于让音轨与字幕两条提示同时出现时上下错开。 */
+  constructor(document: Document, options: { top?: string } = {}) {
     this.document = document;
+    this.top = options.top ?? '72px';
   }
 
   show(requested: AudioMediaTrack, playing: AudioMediaTrack): void {
+    this.showText(
+      `浏览器无法播放 ${formatAudioShortLabel(requested)}，已改用 ${formatAudioShortLabel(playing)}`,
+      'audio',
+    );
+  }
+
+  /** 同一位置只保留最新一条提示；文本走 textContent，不解析为 HTML。 */
+  showText(text: string, kind: 'audio' | 'subtitle'): void {
     this.dispose();
     const element = this.document.createElement('div');
     element.setAttribute('role', 'status');
-    element.dataset.shimweaveNotice = 'audio';
-    element.textContent = `浏览器无法播放 ${formatAudioShortLabel(requested)}，已改用 ${formatAudioShortLabel(playing)}`;
+    element.dataset.shimweaveNotice = kind;
+    element.textContent = text;
     Object.assign(element.style, {
       position: 'fixed',
-      top: '72px',
+      top: this.top,
       left: '50%',
       transform: 'translateX(-50%)',
       zIndex: '2147483647',

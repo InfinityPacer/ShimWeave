@@ -12,6 +12,7 @@ import {
 import { BrowserCapabilityRuntime, createBrowserCapabilityScope } from './capability-runtime.js';
 import { readSettings } from './extension-settings.js';
 import { BrowserPlaybackRuntime } from './playback-runtime.js';
+import { formatSubtitleUnavailable } from './player-presentation.js';
 import { PlexAudioNotice } from './plex-audio-notice.js';
 import { PlexErrorPresenter } from './plex-error-presenter.js';
 import { PlexNativePlaybackHost } from './plex-native-host.js';
@@ -48,6 +49,7 @@ function startPlexRuntime(): ActivePlexRuntime {
   const activation = new SiteAdapterClientActivation({ activate: requestActivation });
   const errorPresenter = new PlexErrorPresenter({ document });
   const audioNotice = new PlexAudioNotice(document);
+  const subtitleNotice = new PlexAudioNotice(document, { top: '124px' });
   const postPageMessage = (message: PlexNativeMessage): void =>
     window.postMessage(message, location.origin);
   const host = new PlexNativePlaybackHost({
@@ -79,6 +81,8 @@ function startPlexRuntime(): ActivePlexRuntime {
     resolveStreamSelection: requestStreamSelection,
     readAudioFallback: async () => (await readSettings()).audioFallback,
     presentAudioSubstitution: (requested, playing) => audioNotice.show(requested, playing),
+    presentSubtitleUnavailable: (reason, codec) =>
+      subtitleNotice.showText(formatSubtitleUnavailable(reason, codec), 'subtitle'),
   });
 
   const onRuntimeMessage = (message: unknown): false => {
@@ -134,6 +138,7 @@ function startPlexRuntime(): ActivePlexRuntime {
       window.removeEventListener('message', onPageMessage);
       errorPresenter.dispose();
       audioNotice.dispose();
+      subtitleNotice.dispose();
       await host.dispose();
       capabilityRuntime?.close();
     },

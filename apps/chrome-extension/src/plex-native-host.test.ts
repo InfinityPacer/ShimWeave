@@ -226,6 +226,62 @@ describe('PlexNativePlaybackHost', () => {
     await host.dispose();
   });
 
+  it('Plex 选中的字幕对应到引擎字幕轨，对应不上时提示不可用', async () => {
+    const media = new TestMediaElement();
+    const start = vi.fn(async (request: BrowserPlaybackRequest) => {
+      request.onSubtitleUnavailable?.('read_failed');
+      return activePlayback(vi.fn(), new Promise<void>(() => undefined));
+    });
+    const presentSubtitleUnavailable = vi.fn();
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({ start, stop: vi.fn(async () => undefined) }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: vi.fn(),
+      readStartSeconds: () => undefined,
+      createNoticeId: () => 'notice_id_1234567890',
+      resolveStreamSelection: async () => ({ subtitle: { ordinal: 1, codec: 'srt' } }),
+      presentSubtitleUnavailable,
+    });
+    const notice = control('request-1', 'playback-1', 'source-1');
+    host.acceptRuntimeMessage(started('request-1', 'playback-1', 'source-1'));
+    host.acceptRuntimeMessage(notice);
+    host.acceptPageMessage({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-start',
+      requestKey: notice.requestKey,
+      noticeId: 'notice_id_1234567890',
+      sessionId: 'native_session_1234567890',
+    });
+    await flush();
+
+    const request = start.mock.calls[0]?.[0];
+    const withSubtitles = (codecs: string[]) => ({
+      ...descriptor,
+      tracks: [
+        ...descriptor.tracks,
+        ...codecs.map((codec, index) => ({
+          id: String(10 + index),
+          kind: 'subtitle' as const,
+          codec,
+        })),
+      ],
+    });
+    expect(request?.selectSubtitleTrack?.(withSubtitles(['ass', 'srt']))).toEqual({
+      trackId: '11',
+    });
+    expect(request?.selectSubtitleTrack?.(withSubtitles(['srt', 'pgs']))).toEqual({
+      unavailable: 'mismatch',
+      codec: 'srt',
+    });
+    expect(request?.selectSubtitleTrack?.(withSubtitles(['srt']))).toEqual({
+      unavailable: 'mismatch',
+      codec: 'srt',
+    });
+    expect(presentSubtitleUnavailable).toHaveBeenCalledExactlyOnceWith('read_failed', undefined);
+    await host.dispose();
+  });
+
   it('读取音轨选择失败时按默认音轨和严格策略起播', async () => {
     const media = new TestMediaElement();
     const start = vi.fn(async (_request: BrowserPlaybackRequest) =>
@@ -260,6 +316,7 @@ describe('PlexNativePlaybackHost', () => {
     expect(start).toHaveBeenCalledOnce();
     expect(start.mock.calls[0]?.[0]).toMatchObject({ audioFallback: 'strict' });
     expect(start.mock.calls[0]?.[0]).not.toHaveProperty('selectAudioTrack');
+    expect(start.mock.calls[0]?.[0]).not.toHaveProperty('selectSubtitleTrack');
     await host.dispose();
   });
 

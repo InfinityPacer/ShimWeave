@@ -510,6 +510,72 @@ const readyClient = (worker: TestWorker): MediaWorkerClient => {
   return client;
 };
 
+describe('MediaWorkerClient 字幕', () => {
+  it('只把当前流的有效字幕消息交给回调', async () => {
+    const worker = new TestWorker();
+    const client = new MediaWorkerClient({
+      source: directSource(),
+      sessionId: 'session',
+      workerURL: 'chrome-extension://test/media-worker.js',
+      createWorker: () => worker,
+      createSharedWorker: () => {
+        throw new Error('unavailable');
+      },
+    });
+    worker.emit({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'ready',
+      sessionId: 'session',
+      schedulerMode: 'local',
+    });
+    const onSubtitleCues = vi.fn();
+    const onSubtitleUnavailable = vi.fn();
+    void client
+      .startStream({ subtitleTrackId: '3', onSubtitleCues, onSubtitleUnavailable })
+      .catch(() => undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+    const request = worker.sent.at(-1)?.message as { requestId: string; subtitleTrackId: string };
+    expect(request.subtitleTrackId).toBe('3');
+
+    const cues = [{ startSeconds: 1, endSeconds: 2, text: '字幕', placement: 'top' }];
+    worker.emit({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'subtitle-cues',
+      requestId: request.requestId,
+      cues,
+    });
+    worker.emit({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'subtitle-cues',
+      requestId: 'other',
+      cues,
+    });
+    worker.emit({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'subtitle-cues',
+      requestId: request.requestId,
+      cues: [{ startSeconds: 2, endSeconds: 1, text: '倒序' }],
+    });
+    worker.emit({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'subtitle-unavailable',
+      requestId: request.requestId,
+      reason: 'invented',
+    });
+    worker.emit({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'subtitle-unavailable',
+      requestId: request.requestId,
+      reason: 'unsupported_encoding',
+    });
+
+    expect(onSubtitleCues).toHaveBeenCalledExactlyOnceWith(cues);
+    expect(onSubtitleUnavailable).toHaveBeenCalledExactlyOnceWith('unsupported_encoding');
+    await client.close();
+  });
+});
+
 const directSource = () => ({
   sourceId: 'stable-source',
   access: { kind: 'direct-http-range' as const, url: 'https://cdn.example/media' },

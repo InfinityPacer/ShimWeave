@@ -6,7 +6,7 @@ import type {
   SampleCapabilityEvidence,
 } from '@shimweave/contracts';
 import { describe, expect, it, vi } from 'vitest';
-import type { MediaWorkerStream } from './media-worker-client.js';
+import type { MediaWorkerStream, MediaWorkerStreamOptions } from './media-worker-client.js';
 import {
   BrowserPlaybackRuntime,
   BrowserPlaybackSupersededError,
@@ -398,6 +398,162 @@ const directSource = (sourceId: string, url: string, native = false): MediaSourc
   sourceId,
   access: { kind: 'direct-http-range', url },
   ...(native ? { nativePlaybackUrl: url } : {}),
+});
+
+describe('BrowserPlaybackRuntime 字幕', () => {
+  const subtitleDescriptor: MediaDescriptor = {
+    ...descriptor,
+    tracks: [
+      ...descriptor.tracks,
+      { id: 'subtitle-3', kind: 'subtitle', codec: 'srt', language: 'chi' },
+    ],
+  };
+  const subtitlePlan: PlaybackPlan = { ...plan, subtitleTrackId: 'subtitle-3' };
+
+  const setup = (planned: PlaybackPlan, media = new TestMediaElement()) => {
+    const worker = new TestWorker();
+    worker.describe.mockResolvedValue(subtitleDescriptor);
+    const renderer = { reset: vi.fn(), add: vi.fn(), dispose: vi.fn() };
+    const createSubtitleRenderer = vi.fn(() => renderer);
+    const stops = [vi.fn(async () => undefined), vi.fn(async () => undefined)];
+    const planPlayback = vi.fn(
+      async (): Promise<PlanningResult> => ({
+        status: 'ready',
+        plan: planned,
+        evidence: [],
+      }),
+    );
+    const runtime = new BrowserPlaybackRuntime({
+      capabilities: { plan: planPlayback, recordSample: vi.fn(async () => undefined) },
+      createWorker: () => worker,
+      createMseController: () => {
+        const stop = stops.shift() ?? vi.fn(async () => undefined);
+        return {
+          start: vi.fn(async () => ({ completion: new Promise<void>(() => undefined), stop })),
+          stop,
+        };
+      },
+      createSubtitleRenderer,
+    });
+    const options = (call: number): MediaWorkerStreamOptions =>
+      (worker.startStream.mock.calls as unknown as [MediaWorkerStreamOptions][])[call]?.[0] ?? {};
+    return { media, worker, renderer, createSubtitleRenderer, planPlayback, runtime, options };
+  };
+
+  it('把站点选中的字幕交给规划，并随视频流请求同一条字幕', async () => {
+    const { media, runtime, planPlayback, createSubtitleRenderer, renderer, options } =
+      setup(subtitlePlan);
+
+    await runtime.start({
+      source: directSource('source-a', 'https://cdn.example/media'),
+      mediaElement: media as unknown as HTMLMediaElement,
+      selectSubtitleTrack: () => ({ trackId: 'subtitle-3' }),
+    });
+
+    expect(planPlayback).toHaveBeenCalledWith(
+      expect.objectContaining({ preferredSubtitleTrackId: 'subtitle-3' }),
+    );
+    expect(createSubtitleRenderer).toHaveBeenCalledWith(media, 'chi');
+    expect(options(0).subtitleTrackId).toBe('subtitle-3');
+    const cues = [{ startSeconds: 1, endSeconds: 2, text: '字幕' }];
+    options(0).onSubtitleCues?.(cues);
+    expect(renderer.add).toHaveBeenCalledWith(cues);
+  });
+
+  it('缓冲外 Seek 重建字幕代次，旧代迟到的 cue 不再写入', async () => {
+    const media = new TestMediaElement();
+    media.buffered = ranges([[0, 10]]);
+    const { runtime, renderer, options, worker } = setup(subtitlePlan, media);
+    const active = await runtime.start({
+      source: directSource('source-a', 'https://cdn.example/media'),
+      mediaElement: media as unknown as HTMLMediaElement,
+      selectSubtitleTrack: () => ({ trackId: 'subtitle-3' }),
+    });
+    expect(renderer.reset).toHaveBeenCalledTimes(1);
+
+    media.dispatchEvent(new Event('playing'));
+    media.currentTime = 100;
+    media.dispatchEvent(new Event('seeking'));
+    await flush();
+
+    expect(worker.startStream).toHaveBeenCalledTimes(2);
+    expect(options(1)).toMatchObject({ subtitleTrackId: 'subtitle-3', startSeconds: 100 });
+    expect(renderer.reset).toHaveBeenCalledTimes(2);
+    options(0).onSubtitleCues?.([{ startSeconds: 1, endSeconds: 2, text: '旧' }]);
+    expect(renderer.add).not.toHaveBeenCalled();
+    const fresh = [{ startSeconds: 100, endSeconds: 101, text: '新' }];
+    options(1).onSubtitleCues?.(fresh);
+    expect(renderer.add).toHaveBeenCalledWith(fresh);
+
+    await active.stop();
+    expect(renderer.dispose).toHaveBeenCalledOnce();
+    options(1).onSubtitleCues?.(fresh);
+    expect(renderer.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('没有选字幕时不创建渲染器，也不请求字幕', async () => {
+    const { media, runtime, createSubtitleRenderer, options, planPlayback } = setup(plan);
+
+    await runtime.start({
+      source: directSource('source-a', 'https://cdn.example/media'),
+      mediaElement: media as unknown as HTMLMediaElement,
+      selectSubtitleTrack: () => undefined,
+    });
+
+    expect(planPlayback).toHaveBeenCalledWith(
+      expect.not.objectContaining({ preferredSubtitleTrackId: expect.anything() }),
+    );
+    expect(createSubtitleRenderer).not.toHaveBeenCalled();
+    expect(options(0).subtitleTrackId).toBeUndefined();
+  });
+
+  it('站点对应不上或规划判定不可显示时提示一次，视频照常播放', async () => {
+    const mismatch = setup(plan);
+    const onSubtitleUnavailable = vi.fn();
+    await mismatch.runtime.start({
+      source: directSource('source-a', 'https://cdn.example/media'),
+      mediaElement: mismatch.media as unknown as HTMLMediaElement,
+      selectSubtitleTrack: () => ({ unavailable: 'mismatch', codec: 'srt' }),
+      onSubtitleUnavailable,
+    });
+    expect(onSubtitleUnavailable).toHaveBeenCalledExactlyOnceWith('mismatch', 'srt');
+    expect(mismatch.worker.startStream).toHaveBeenCalledOnce();
+
+    const graphic = setup({
+      ...plan,
+      subtitleUnavailable: { reason: 'unsupported_codec', codec: 'pgs' },
+    });
+    const onGraphic = vi.fn();
+    await graphic.runtime.start({
+      source: directSource('source-a', 'https://cdn.example/media'),
+      mediaElement: graphic.media as unknown as HTMLMediaElement,
+      selectSubtitleTrack: () => ({ trackId: 'subtitle-9' }),
+      onSubtitleUnavailable: onGraphic,
+    });
+    expect(onGraphic).toHaveBeenCalledExactlyOnceWith('unsupported_codec', 'pgs');
+    expect(graphic.createSubtitleRenderer).not.toHaveBeenCalled();
+  });
+
+  it('字幕读取失败只提示一次，不结束播放', async () => {
+    const { media, runtime, options } = setup(subtitlePlan);
+    const onSubtitleUnavailable = vi.fn();
+    const active = await runtime.start({
+      source: directSource('source-a', 'https://cdn.example/media'),
+      mediaElement: media as unknown as HTMLMediaElement,
+      selectSubtitleTrack: () => ({ trackId: 'subtitle-3' }),
+      onSubtitleUnavailable,
+    });
+
+    options(0).onSubtitleUnavailable?.('read_failed');
+    options(0).onSubtitleUnavailable?.('read_failed');
+    expect(onSubtitleUnavailable).toHaveBeenCalledExactlyOnceWith('read_failed', undefined);
+    let settled = false;
+    void active.completion.finally(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false);
+  });
 });
 
 const stream = (): MediaWorkerStream => ({

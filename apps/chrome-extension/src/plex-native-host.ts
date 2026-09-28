@@ -5,8 +5,13 @@ import {
   type PlexRequestStartedNotice,
   type PlexStreamSelection,
   resolvePlexAudioTrack,
+  resolvePlexSubtitleTrack,
 } from '@shimweave/adapter-plex';
-import type { AudioFallbackPolicy, AudioMediaTrack } from '@shimweave/contracts';
+import type {
+  AudioFallbackPolicy,
+  AudioMediaTrack,
+  SubtitleUnavailableReason,
+} from '@shimweave/contracts';
 import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
 import type { PlayerFrameEvent } from './player-frame-protocol.js';
 import { PLAYER_FRAME_PROTOCOL } from './player-frame-protocol.js';
@@ -39,6 +44,8 @@ export interface PlexNativePlaybackHostOptions {
   resolveStreamSelection?(notice: PlexMediaSourceNotice): Promise<PlexStreamSelection>;
   readAudioFallback?(): Promise<AudioFallbackPolicy>;
   presentAudioSubstitution?(requested: AudioMediaTrack, playing: AudioMediaTrack): void;
+  /** Plex 里选了字幕但无法显示时提示一次，视频照常播放。 */
+  presentSubtitleUnavailable?(reason: SubtitleUnavailableReason, codec?: string): void;
   createNoticeId?: () => string;
   schedule?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   cancelSchedule?: (handle: ReturnType<typeof setTimeout>) => void;
@@ -232,6 +239,24 @@ export class PlexNativePlaybackHost {
             }
           : {}),
         audioFallback,
+        // 未选字幕时字幕保持关闭；选了但对应不上时提示不可用，不猜测其他字幕。
+        ...(selection.subtitle
+          ? {
+              selectSubtitleTrack: (descriptor) => {
+                const resolved = resolvePlexSubtitleTrack(descriptor.tracks, selection.subtitle);
+                if (resolved.status === 'track') return { trackId: resolved.trackId };
+                if (resolved.status === 'off') return undefined;
+                return {
+                  unavailable: resolved.reason,
+                  ...(resolved.codec ? { codec: resolved.codec } : {}),
+                };
+              },
+              onSubtitleUnavailable: (reason, codec) => {
+                if (this.active !== session) return;
+                this.options.presentSubtitleUnavailable?.(reason, codec);
+              },
+            }
+          : {}),
         ...(startSeconds !== undefined ? { startSeconds } : {}),
         onDescriptor: (descriptor) => {
           if (this.active !== session) return;
