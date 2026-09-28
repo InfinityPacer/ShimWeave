@@ -25,6 +25,12 @@ import { MEDIA_RANGE_SCHEDULER_OPTIONS } from './range-policy.js';
 import { WorkerFragmentSink } from './worker-fragment-sink.js';
 
 const STREAM_READ_AHEAD_BYTES = 4 * 1024 * 1024;
+/**
+ * 起播与 Seek 时视频先从关键帧往后读出几块，音频再从同一关键帧开始读。默认 16 MiB 的缓存
+ * 装不下这段距离，音频会把视频刚读过的块重新下载，放大到 48 MiB 后不再重复。
+ * 并行预取实测无益，外网到源站的总吞吐封顶，多开的连接只是分掉同一份带宽。
+ */
+const STREAM_CACHE_BYTES = 48 * 1024 * 1024;
 
 interface SchedulerRuntime {
   mode: 'shared' | 'local';
@@ -344,7 +350,9 @@ const createMediaSession = async (
       : {}),
   });
   const rangeSession = new RangeSession({ scheduler });
-  const broker = rangeSession.createBroker(source);
+  const broker = rangeSession.createBroker(source, {
+    maxCacheBytes: STREAM_CACHE_BYTES,
+  });
   let mediaSession: MediaEngineSession;
   try {
     mediaSession = mediaEngine.createSession(broker);
