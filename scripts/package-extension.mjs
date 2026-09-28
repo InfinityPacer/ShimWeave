@@ -25,6 +25,8 @@ const packageFiles = new Set([
   'LICENSE',
   'manifest.json',
   'media-worker.js',
+  'options.html',
+  'options.js',
   'plex-content.js',
   'plex-native-main.js',
   'range-coordinator.js',
@@ -101,7 +103,7 @@ async function collectPackageFiles(root) {
 function isPackageFile(path) {
   if (packageFiles.has(path)) return true;
   if (/^chunks\/[^/]+\.js$/.test(path)) return true;
-  return /^icons\/[^/]+\.png$/.test(path);
+  return /^icons\/[^/]+\.(png|svg)$/.test(path);
 }
 
 function compareNames(left, right) {

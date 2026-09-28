@@ -39,6 +39,15 @@ await Promise.all([
     sourcemap: true,
   }),
   build({
+    entryPoints: [resolve(applicationRoot, 'src/options.ts')],
+    outfile: resolve(outputRoot, 'options.js'),
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    target: 'chrome120',
+    sourcemap: true,
+  }),
+  build({
     entryPoints: [resolve(applicationRoot, 'src/worker-frame.ts')],
     outfile: resolve(outputRoot, 'worker-frame.js'),
     bundle: true,

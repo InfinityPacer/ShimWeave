@@ -3,7 +3,10 @@ import {
   type PlexMediaSourceNotice,
   type PlexNativeMessage,
   type PlexRequestStartedNotice,
+  type PlexStreamSelection,
+  resolvePlexAudioTrack,
 } from '@shimweave/adapter-plex';
+import type { AudioFallbackPolicy, AudioMediaTrack } from '@shimweave/contracts';
 import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
 import type { PlayerFrameEvent } from './player-frame-protocol.js';
 import { PLAYER_FRAME_PROTOCOL } from './player-frame-protocol.js';
@@ -32,6 +35,10 @@ export interface PlexNativePlaybackHostOptions {
   createTimelineReporter?(notice: PlexMediaSourceNotice): TimelineReporterPort | undefined;
   releaseNotice?(notice: PlexMediaSourceNotice): void;
   presentFailure?(failure: PlaybackFailurePresentation, formats: MediaFormatPresentation): void;
+  /** 读取 Plex 为当前用户记住的音轨选择；失败时返回空选择，不能阻断起播。 */
+  resolveStreamSelection?(notice: PlexMediaSourceNotice): Promise<PlexStreamSelection>;
+  readAudioFallback?(): Promise<AudioFallbackPolicy>;
+  presentAudioSubstitution?(requested: AudioMediaTrack, playing: AudioMediaTrack): void;
   createNoticeId?: () => string;
   schedule?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   cancelSchedule?: (handle: ReturnType<typeof setTimeout>) => void;
@@ -208,13 +215,31 @@ export class PlexNativePlaybackHost {
     this.active = session;
 
     try {
+      const noSelection: PlexStreamSelection = {};
+      const [selection, audioFallback] = await Promise.all([
+        this.options.resolveStreamSelection?.(notice).catch(() => noSelection) ?? noSelection,
+        this.options.readAudioFallback?.().catch((): AudioFallbackPolicy => 'strict') ??
+          ('strict' as AudioFallbackPolicy),
+      ]);
+      if (this.active !== session || this.disposed) return;
       const playback = await this.getRuntime().start({
         source: notice.source,
         mediaElement,
+        ...(selection.audio
+          ? {
+              selectAudioTrack: (descriptor) =>
+                resolvePlexAudioTrack(descriptor.tracks, selection.audio),
+            }
+          : {}),
+        audioFallback,
         ...(startSeconds !== undefined ? { startSeconds } : {}),
         onDescriptor: (descriptor) => {
           if (this.active !== session) return;
           session.descriptor = descriptor;
+        },
+        onPlan: (plan, descriptor) => {
+          if (this.active !== session) return;
+          this.presentSubstitution(plan, descriptor);
         },
       });
       if (this.active !== session || session.generation !== this.generation || this.disposed) {
@@ -238,6 +263,21 @@ export class PlexNativePlaybackHost {
       if (this.active !== session) return;
       await this.failSession(session, error);
     }
+  }
+
+  private presentSubstitution(
+    plan: ActiveBrowserPlayback['plan'],
+    descriptor: ActiveBrowserPlayback['descriptor'],
+  ): void {
+    const requestedId = plan.audioSubstitution?.requestedTrackId;
+    if (!requestedId || !this.options.presentAudioSubstitution) return;
+    const audio = (id: string | undefined) =>
+      descriptor.tracks.find(
+        (track): track is AudioMediaTrack => track.kind === 'audio' && track.id === id,
+      );
+    const requested = audio(requestedId);
+    const playing = audio(plan.audioTrackId);
+    if (requested && playing) this.options.presentAudioSubstitution(requested, playing);
   }
 
   private async failSession(session: NativePlaybackSession, error: unknown): Promise<void> {

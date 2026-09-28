@@ -431,14 +431,123 @@ describe('planPlayback', () => {
     });
   });
 
-  it('明确选择音轨时跳过无法控制内嵌音轨的原生路径', () => {
-    const media = intent();
-    media.preferredAudioTrackId = 'audio-1';
+  it('明确选择非默认音轨时跳过无法控制内嵌音轨的原生路径', () => {
+    const media = intent({ mimeType: 'video/x-matroska' }, {}, { isDefault: true });
+    media.media.tracks = [
+      ...media.media.tracks,
+      { id: 'audio-2', kind: 'audio', codec: 'aac', codecString: 'mp4a.40.2', channels: 2 },
+    ];
+    media.preferredAudioTrackId = 'audio-2';
 
     const planned = candidateFrom(planPlayback(media, baseCapabilities()));
 
     expect(planned.path).toBe('mse-remux');
+    expect(planned.audioTrackId).toBe('audio-2');
+  });
+
+  it('明确选择的正是默认音轨时仍可先走原生路径', () => {
+    const media = intent({ mimeType: 'video/x-matroska' }, {}, { isDefault: true });
+    media.preferredAudioTrackId = 'audio-1';
+
+    const planned = candidateFrom(planPlayback(media, baseCapabilities()));
+
+    expect(planned.path).toBe('native-file');
     expect(planned.audioTrackId).toBe('audio-1');
+  });
+
+  describe('compatible 音轨回退', () => {
+    const remuxBlu = (): PlaybackIntent => {
+      const media = intent(
+        {},
+        {},
+        { codec: 'a_truehd', language: 'eng', channels: 8, isDefault: true },
+      );
+      const truehd = media.media.tracks.find((track) => track.kind === 'audio');
+      if (!truehd) throw new Error('Expected audio track');
+      delete truehd.codecString;
+      media.media.tracks = [
+        ...media.media.tracks,
+        {
+          id: 'ac3-zh',
+          kind: 'audio',
+          codec: 'ac3',
+          codecString: 'ac-3',
+          language: 'chi',
+          channels: 2,
+        },
+        {
+          id: 'ac3-en',
+          kind: 'audio',
+          codec: 'ac3',
+          codecString: 'ac-3',
+          language: 'eng',
+          channels: 6,
+        },
+      ];
+      media.nativeSourceUrlAvailable = false;
+      media.preferredAudioTrackId = 'audio-1';
+      return media;
+    };
+
+    it('strict 策略下选中音轨没有路径时直接判定不支持', () => {
+      expect(planPlayback(remuxBlu(), baseCapabilities())).toEqual({
+        status: 'unsupported',
+        reason: 'no_playback_path',
+        evidence: [],
+      });
+    });
+
+    it('选中音轨没有路径时改用同语言的可播放音轨并记录替换', () => {
+      const media = remuxBlu();
+      media.audioFallback = 'compatible';
+
+      const planned = candidateFrom(planPlayback(media, baseCapabilities()));
+
+      expect(planned.audioTrackId).toBe('ac3-en');
+      expect(planned.audioSubstitution).toEqual({ requestedTrackId: 'audio-1' });
+    });
+
+    // 能力证据按配置记录，所以其他语言的备选要换一种配置（这里是双声道）才有意义。
+    it('同语言备选确定失败后继续尝试其他语言', () => {
+      const media = remuxBlu();
+      media.audioFallback = 'compatible';
+      const english = candidateFrom(planPlayback(media, baseCapabilities()));
+      const englishRemuxUnsupported = evidenceFor(english, {
+        kind: 'mse-type',
+        support: 'unsupported',
+        contentType: 'video/mp4; codecs="hvc1.2.4.L153.B0, ac-3"',
+      });
+      const transcode = candidateFrom(
+        planPlayback(media, baseCapabilities([englishRemuxUnsupported])),
+      );
+      expect(transcode).toMatchObject({
+        audioTrackId: 'ac3-en',
+        path: 'mse-remux-audio-transcode',
+      });
+      const transcodeUnsupported = evidenceFor(transcode, {
+        kind: 'mse-type',
+        support: 'unsupported',
+        contentType: 'video/mp4; codecs="hvc1.2.4.L153.B0, mp4a.40.2"',
+      });
+
+      const chinese = candidateFrom(
+        planPlayback(media, baseCapabilities([englishRemuxUnsupported, transcodeUnsupported])),
+      );
+
+      expect(chinese.audioTrackId).toBe('ac3-zh');
+      expect(chinese.audioSubstitution).toEqual({ requestedTrackId: 'audio-1' });
+    });
+
+    it('选中音轨可以转换时不替换', () => {
+      const media = remuxBlu();
+      media.audioFallback = 'compatible';
+      media.preferredAudioTrackId = 'ac3-zh';
+
+      const planned = candidateFrom(planPlayback(media, baseCapabilities()));
+
+      expect(planned.audioTrackId).toBe('ac3-zh');
+      expect(planned.audioSubstitution).toBeUndefined();
+    });
   });
 
   it('字幕轨道未实现时明确拒绝而不生成无效计划', () => {

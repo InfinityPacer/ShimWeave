@@ -128,6 +128,14 @@ export class PlexTimelineDispatcher {
     }
   }
 
+  /** 返回同一页面发起的播放会话上下文，供后台代为读取 Plex 元数据；凭据不离开后台。 */
+  context(reportId: string, sender: PlexTimelineSender): PlexTimelineContext | undefined {
+    const entry = this.entries.get(reportId);
+    if (!entry || entry.closing || !sameSender(entry, sender)) return undefined;
+    entry.lastUsedAt = this.now();
+    return entry.context;
+  }
+
   dispatch(message: PlexTimelineMessage, sender: PlexTimelineSender): Promise<boolean> {
     const entry = this.entries.get(message.reportId);
     if (!entry || entry.closing || !sameSender(entry, sender)) return Promise.resolve(false);

@@ -91,9 +91,16 @@ export interface PlaybackIntent {
   /** false 表示当前地址只能由可附加请求头的 ByteSource 读取，不能交给原生媒体元素。 */
   nativeSourceUrlAvailable?: boolean;
   preferredAudioTrackId?: string;
+  /**
+   * 选中音轨没有可执行路径时的处理。strict 直接判定不支持；compatible 改用同一媒体里
+   * 可播放的其他音轨，计划通过 audioSubstitution 说明替换。缺省为 strict。
+   */
+  audioFallback?: AudioFallbackPolicy;
   preferredSubtitleTrackId?: string;
   startSeconds?: number;
 }
+
+export type AudioFallbackPolicy = 'strict' | 'compatible';
 
 /** 音频转换的确定性输出，能力判断和媒体引擎必须使用同一组参数。 */
 export interface AudioTranscodeOutput {
@@ -296,6 +303,8 @@ export interface PlaybackPlan {
   videoTrackId: string;
   audioTrackId?: string;
   outputAudio?: AudioTranscodeOutput;
+  /** 选中音轨无法播放、按 compatible 策略改用 audioTrackId 时，记录原本选中的音轨。 */
+  audioSubstitution?: { requestedTrackId: string };
   subtitleTrackId?: string;
 }
 

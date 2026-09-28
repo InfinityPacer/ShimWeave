@@ -68,33 +68,96 @@ export const planPlayback = (
   }
 
   const mediaFingerprint = createMediaFingerprint(intent.media);
-  const candidates = createCandidates(
-    intent,
-    capabilities,
-    video as CompleteVideoTrack,
-    audio,
-    mediaFingerprint,
-  );
-  if (candidates.length === 0) {
-    return { status: 'unsupported', reason: 'no_playback_path', evidence: [] };
-  }
+  const nativeAudio = chooseTrack(audios);
+  const attempts: readonly (AudioTrack | undefined)[] =
+    audio && intent.audioFallback === 'compatible'
+      ? [audio, ...rankFallbackAudio(audios, audio)]
+      : [audio];
 
   const rejected: string[] = [];
-  for (const candidate of candidates) {
-    const evaluation = evaluateCandidate(candidate, capabilities, mediaFingerprint);
-    if (evaluation.status === 'ready') {
-      return { status: 'ready', plan: candidate.plan, evidence: evaluation.evidence };
+  let hadCandidates = false;
+  for (const attempt of attempts) {
+    const candidates = createCandidates(
+      intent,
+      capabilities,
+      video as CompleteVideoTrack,
+      attempt,
+      mediaFingerprint,
+      // 原生媒体元素只会播放容器默认音轨，选中其他音轨时必须走转封装。
+      attempt === nativeAudio,
+    );
+    if (candidates.length === 0) {
+      if (attempt === audio) rejected.push('audio_no_playback_path');
+      continue;
     }
-    if (evaluation.status === 'probe-required') {
-      return {
-        status: 'probe-required',
-        candidate: candidate.plan,
-        probes: evaluation.probes,
-      };
+    hadCandidates = true;
+    const substitution =
+      audio && attempt && attempt !== audio ? { requestedTrackId: audio.id } : undefined;
+    for (const candidate of candidates) {
+      const plan = substitution
+        ? { ...candidate.plan, audioSubstitution: substitution }
+        : candidate.plan;
+      const evaluation = evaluateCandidate(candidate, capabilities, mediaFingerprint);
+      if (evaluation.status === 'ready') {
+        return { status: 'ready', plan, evidence: evaluation.evidence };
+      }
+      if (evaluation.status === 'probe-required') {
+        return { status: 'probe-required', candidate: plan, probes: evaluation.probes };
+      }
+      rejected.push(...evaluation.evidence, evaluation.reason);
     }
-    rejected.push(...evaluation.evidence, evaluation.reason);
+  }
+  if (!hadCandidates) {
+    return { status: 'unsupported', reason: 'no_playback_path', evidence: [] };
   }
   return { status: 'unsupported', reason: 'no_supported_playback_path', evidence: rejected };
+};
+
+/**
+ * compatible 策略下的备选顺序：与选中音轨同语言的优先，其次是容器默认轨，再按声道数从多到少，
+ * 其余保持容器内顺序。只决定尝试顺序，能否播放仍由候选评估决定。
+ */
+const rankFallbackAudio = (audios: readonly AudioTrack[], requested: AudioTrack): AudioTrack[] => {
+  const language = normalizeLanguage(requested.language);
+  const score = (track: AudioTrack): [number, number, number] => [
+    language !== undefined && normalizeLanguage(track.language) === language ? 1 : 0,
+    track.isDefault ? 1 : 0,
+    track.channels ?? 0,
+  ];
+  return audios
+    .map((track, order) => ({ track, order, score: score(track) }))
+    .filter(({ track }) => track !== requested)
+    .sort((left, right) => {
+      for (let index = 0; index < left.score.length; index += 1) {
+        const difference = (right.score[index] ?? 0) - (left.score[index] ?? 0);
+        if (difference !== 0) return difference;
+      }
+      return left.order - right.order;
+    })
+    .map(({ track }) => track);
+};
+
+/** ISO 639-2 的 B/T 两套代码与常见的两字母代码归一，避免 chi/zho/zh 被当成不同语言。 */
+const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
+  zh: 'zho',
+  chi: 'zho',
+  en: 'eng',
+  ja: 'jpn',
+  ko: 'kor',
+  fr: 'fra',
+  fre: 'fra',
+  de: 'deu',
+  ger: 'deu',
+  es: 'spa',
+  it: 'ita',
+  ru: 'rus',
+  pt: 'por',
+};
+
+export const normalizeLanguage = (value: string | undefined): string | undefined => {
+  const primary = value?.trim().toLowerCase().split(/[-_]/)[0];
+  if (!primary || primary === 'und') return undefined;
+  return LANGUAGE_ALIASES[primary] ?? primary;
 };
 
 type CompleteVideoTrack = VideoMediaTrack & {
@@ -123,14 +186,15 @@ const createCandidates = (
   video: CompleteVideoTrack,
   audio: AudioTrack | undefined,
   mediaFingerprint: string,
+  nativeAudio: boolean,
 ): Candidate[] => {
   const candidates: Candidate[] = [];
   const originalAudio = hasCodecString(audio) ? audio : undefined;
   const canKeepOriginalAudio = audio === undefined || originalAudio !== undefined;
   if (
     canKeepOriginalAudio &&
+    nativeAudio &&
     intent.nativeSourceUrlAvailable !== false &&
-    !intent.preferredAudioTrackId &&
     intent.media.mimeType
   ) {
     candidates.push(

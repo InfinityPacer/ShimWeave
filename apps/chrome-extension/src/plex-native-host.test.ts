@@ -6,7 +6,7 @@ import {
 } from '@shimweave/adapter-plex';
 import type { MediaDescriptor, PlaybackPlan } from '@shimweave/contracts';
 import { describe, expect, it, vi } from 'vitest';
-import type { ActiveBrowserPlayback } from './playback-runtime.js';
+import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
 import {
   BrowserMediaElementError,
   BrowserPlaybackProbeRequiredError,
@@ -171,6 +171,95 @@ describe('PlexNativePlaybackHost', () => {
       type: 'takeover-stopped',
       sessionId: 'native_session_1234567890',
     });
+    await host.dispose();
+  });
+
+  it('按 Plex 选中的音轨起播，替换音轨时提示一次', async () => {
+    const media = new TestMediaElement();
+    const tracks: MediaDescriptor['tracks'] = [
+      ...descriptor.tracks,
+      { id: '2', kind: 'audio', codec: 'a_truehd', language: 'eng', channels: 6 },
+      { id: '3', kind: 'audio', codec: 'ac3', language: 'eng', channels: 6 },
+    ];
+    const substituted: ActiveBrowserPlayback = {
+      descriptor: { ...descriptor, tracks },
+      plan: { ...plan, audioTrackId: '3', audioSubstitution: { requestedTrackId: '2' } },
+      completion: new Promise<void>(() => undefined),
+      stop: vi.fn(async () => undefined),
+    };
+    const start = vi.fn(async (request: BrowserPlaybackRequest) => {
+      request.onPlan?.(substituted.plan, substituted.descriptor);
+      return substituted;
+    });
+    const presentAudioSubstitution = vi.fn();
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({ start, stop: vi.fn(async () => undefined) }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: vi.fn(),
+      readStartSeconds: () => undefined,
+      createNoticeId: () => 'notice_id_1234567890',
+      resolveStreamSelection: async () => ({ audio: { ordinal: 0, codec: 'truehd' } }),
+      readAudioFallback: async () => 'compatible',
+      presentAudioSubstitution,
+    });
+    const notice = control('request-1', 'playback-1', 'source-1');
+    host.acceptRuntimeMessage(started('request-1', 'playback-1', 'source-1'));
+    host.acceptRuntimeMessage(notice);
+    host.acceptPageMessage({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-start',
+      requestKey: notice.requestKey,
+      noticeId: 'notice_id_1234567890',
+      sessionId: 'native_session_1234567890',
+    });
+    await flush();
+
+    const request = start.mock.calls[0]?.[0];
+    expect(request).toMatchObject({ audioFallback: 'compatible' });
+    expect(request?.selectAudioTrack?.({ ...descriptor, tracks })).toBe('2');
+    expect(presentAudioSubstitution).toHaveBeenCalledOnce();
+    expect(presentAudioSubstitution).toHaveBeenCalledWith(
+      expect.objectContaining({ id: '2' }),
+      expect.objectContaining({ id: '3' }),
+    );
+    await host.dispose();
+  });
+
+  it('读取音轨选择失败时按默认音轨和严格策略起播', async () => {
+    const media = new TestMediaElement();
+    const start = vi.fn(async (_request: BrowserPlaybackRequest) =>
+      activePlayback(vi.fn(), new Promise<void>(() => undefined)),
+    );
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({ start, stop: vi.fn(async () => undefined) }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: vi.fn(),
+      readStartSeconds: () => undefined,
+      createNoticeId: () => 'notice_id_1234567890',
+      resolveStreamSelection: async () => {
+        throw new Error('offline');
+      },
+      readAudioFallback: async () => {
+        throw new Error('storage');
+      },
+    });
+    const notice = control('request-1', 'playback-1', 'source-1');
+    host.acceptRuntimeMessage(started('request-1', 'playback-1', 'source-1'));
+    host.acceptRuntimeMessage(notice);
+    host.acceptPageMessage({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-start',
+      requestKey: notice.requestKey,
+      noticeId: 'notice_id_1234567890',
+      sessionId: 'native_session_1234567890',
+    });
+    await flush();
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(start.mock.calls[0]?.[0]).toMatchObject({ audioFallback: 'strict' });
+    expect(start.mock.calls[0]?.[0]).not.toHaveProperty('selectAudioTrack');
     await host.dispose();
   });
 
