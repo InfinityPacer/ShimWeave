@@ -1,6 +1,6 @@
 {
   "name": "shimweave",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "在浏览器本地为网页播放器补齐媒体格式兼容能力，媒体数据保持源站或 CDN 直达浏览器。",
   "license": "GPL-3.0-only",

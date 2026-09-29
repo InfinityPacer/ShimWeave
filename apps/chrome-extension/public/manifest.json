@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ShimWeave",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "minimum_chrome_version": "120",
   "description": "在浏览器本地为 Plex 等网页播放器补齐媒体格式兼容能力。",
   "icons": {
