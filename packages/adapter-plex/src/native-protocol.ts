@@ -72,7 +72,7 @@ export type PlexNativeMessage =
       sessionId: string;
     };
 
-/** 跨 MAIN 与隔离世界的控制协议不携带媒体地址、Plex Token 或 Gateway bearer。 */
+/** 跨 MAIN 与隔离世界的控制协议不携带媒体地址、Plex Token 或媒体服务 bearer。 */
 export const isPlexNativeMessage = (value: unknown): value is PlexNativeMessage => {
   if (!isRecord(value) || value.protocol !== PLEX_NATIVE_PROTOCOL) return false;
   if (value.sender !== 'extension-host' && value.sender !== 'main-hook') return false;

@@ -6,7 +6,7 @@ ShimWeave 是浏览器端媒体兼容运行时，不是媒体服务器、CDN 代
 
 以下约束不可被实现便利性打破：
 
-1. 媒体字节保持 `源站/CDN → 播放设备浏览器`，不经过 Gateway、NAS 或云端中继。
+1. 媒体字节保持 `源站/CDN → 播放设备浏览器`，不经过媒体服务、NAS 或云端中继。
 2. 原生播放优先于转封装，转封装优先于音频转码；常规路径不做 4K 视频软件转码。
 3. 格式决策只依据媒体事实和运行时能力，不依据客户端名称建立维护不完的特判矩阵。
 4. 站点、浏览器宿主、媒体引擎和编解码扩展均通过接口隔离。
@@ -47,7 +47,7 @@ Adapter-private Player Bridge
 状态与错误，不传递媒体块。
 
 extension-origin Dedicated Worker 在源站授权后直接执行跨域 Range Fetch。浏览器运行时将
-SharedWorker 租约端口交给 Dedicated Worker，源媒体字节不返回 Gateway；可播放 fragment 通过
+SharedWorker 租约端口交给 Dedicated Worker，源媒体字节不返回媒体服务；可播放 fragment 通过
 transferable `ArrayBuffer` 交给浏览器内 MSE。Plex 路径调用内置 Shaka 的 `unload(false)` 释放
 当前媒体数据面，但不分离 Player 与原生 `<video>`；ShimWeave 随后在同一个 `<video>` 上挂载 MSE。
 媒体块不得经过 Base64、高频 extension messaging 或页面消息。
@@ -61,7 +61,7 @@ transferable `ArrayBuffer` 交给浏览器内 MSE。Plex 路径调用内置 Shak
 | `io-fetch` | 严格 HTTP Range、206 与 Content-Range 校验 | 站点凭据、媒体规划、重试风暴 |
 | `engine-mediabunny` | 容器解析、随机读取、转封装和音频 codec provider 装配 | Plex 协议、权限 UI |
 | `adapter-plex` | Plex 页面接入、Part/会话解析、私有播放器 Hook、原生播放桥和 timeline | 格式能力决策、媒体字节处理、其他站点接入 |
-| `chrome-extension` | MV3 权限、站点注册、Worker、浏览器内媒体传输和构建产物 | Gateway 代理、远程执行代码 |
+| `chrome-extension` | MV3 权限、站点注册、Worker、浏览器内媒体传输和构建产物 | 媒体服务代理、远程执行代码 |
 
 后续站点适配器只实现统一 Adapter SDK，并按需提供 `MediaSourceProvider`。核心不得引用 Plex
 URL、字段或产品名称。媒体引擎通过 `MediaEngineProvider` 接收统一 `ByteSource`，并以
@@ -182,7 +182,7 @@ Input，健康输入可以保留同一 Range 会话和缓存。不能使用会�
 媒体读取或解封装失败后，Dedicated Worker 会销毁已进入失败状态的媒体输入并在同一全局
 调度器下重建输入会话。正常播放和 Seek 不走重建路径；重试不会创建额外的跨标签并发池。
 
-对需要 Gateway 协商的源，`FetchRangeSource` 不保存短期 CDN URL。每个 Range 先向固定控制
+对需要经媒体服务协商的源，`FetchRangeSource` 不保存短期 CDN URL。每个 Range 先向固定控制
 端点发送 Range 与会话 bearer，读取无响应体的临时 URL 描述，再创建一条只含 `Accept` 和
 `Range` 的媒体请求。bearer 不放入 URL，也不随重定向发送到 CDN。CDN 返回 403 时，同一
 媒体会话只有一个恢复 leader 重新执行一次控制交换；其他请求等待该结果，播放器、能力规划、
@@ -307,7 +307,7 @@ Plex 字幕选择与音轨共用同一次元数据读取，取 Part 中标为选
 - PGS、VobSub、ASS/SSA、蓝光菜单、DRM/EME 不列入首版承诺。TrueHD 已按上文降级为 AAC 立体声。
 - 字幕只支持 MKV 内嵌的 SRT 与 WebVTT 文本字幕。选中 PGS、VobSub、ASS/SSA 或外挂字幕时提示
   不可用，字幕失败不终止已经建立的视频会话。
-- 浏览器无法处理的视频返回明确限制，不把流量回退到 Gateway 或 NAS。
+- 浏览器无法处理的视频返回明确限制，不把流量回退到媒体服务或 NAS。
 
 后续能力的条件如下，都未排期。
 
@@ -321,7 +321,7 @@ Plex 字幕选择与音轨共用同一次元数据读取，取 Part 中标为选
 - **Dolby Vision P5**。需要按 RPU 重建颜色，可行路径是 WebCodecs 解码加 WebGPU 着色器，依赖 Chrome
   的 HDR 画布能力，属于单独的大项目。
 
-## 站点接管与 Gateway 边界
+## 站点接管与媒体服务边界
 
 Plex adapter 是 ShimWeave 的首个接入实现。它负责监听页面播放意图、解析媒体选择、读取
 初始续播位置，并把不兼容媒体接入 Plex 已有的 Shaka Player。ShimWeave 不创建第二套可见播放器，
@@ -394,21 +394,21 @@ Player 的原生媒体错误事件进入 Plex 错误弹窗，再由独立呈现�
 判定，也不能改变当前本地媒体零接管门禁。它只能减少 Plex 的计算负担，不能减少本地媒体从
 Plex/NAS 源站到浏览器的字节流量。
 
-ShimWeave 与 Gateway 是两个可独立部署、独立演进的产品。Plex 接管先按响应语义做二次分流，
-而不是把 Gateway 能力当作前置条件：
+ShimWeave 与媒体服务是两个可独立部署、独立演进的产品。Plex 接管先按响应语义做二次分流，
+而不是把媒体服务能力当作前置条件：
 
 1. 本地媒体的正常 MPD 和 Plex 已选择的原生 Direct Play 完全旁路，不安装媒体替代会话，
    不启动 Dedicated Worker，也不做媒体探测。
 2. 只有 Plex STRM 的 `start.mpd` 响应明确 302 到整文件时，扩展才可通过 legacy 302 provider
    自行接管；未满足这一结构事实时保持 Plex 原行为。
-3. Gateway 明确返回 `control-v1` 时，可通过 control provider 接管。该协议是减少临时 URL
+3. 媒体服务明确返回 `control-v1` 时，可通过 control provider 接管。该协议是减少临时 URL
    暴露和统一续签的可选优化，不是 ShimWeave 播放能力的运行依赖。
 
 legacy 302 与 `control-v1` 通过可注册的 `MediaSourceProvider` 归一为同一个站点无关
 `MediaSourceDescriptor`。一次播放只能由一个 provider 认领；没有 provider、多个 provider
 同时认领或结果不完整时，必须完整回退 Plex，不建立部分 ShimWeave 会话。provider 只负责把
 站点响应转换为媒体源描述。Host、Dedicated Worker 和播放运行时只消费通用直连或受控 Range
-访问方式，不得把 Plex、Gateway 或客户端字段带入 Range、媒体引擎、能力模型和播放规划。
+访问方式，不得把 Plex、媒体服务或客户端字段带入 Range、媒体引擎、能力模型和播放规划。
 
 Plex 私有 webpack/Shaka 接入只允许存在于 `adapter-plex`。Hook 通过模块结构和所需能力识别目标，
 不得硬编码 webpack 模块 ID；页面版本变化、识别失败或必要能力缺失时，必须保持原播放器请求、
@@ -421,9 +421,9 @@ Plex 私有 webpack/Shaka 接入只允许存在于 `adapter-plex`。Hook 通过�
 
 在可选 `control-v1` 路径中，扩展以版本化请求头声明能力，声明同时出现在 universal `decision` 与
 `start.mpd` 上。`decision` 上的声明只表示浏览器装有扩展，服务端可据此决定是否提示安装，不构成接管，
-不改变决策语义。Gateway 仅在已有 Direct Play Grant、
+不改变决策语义。媒体服务仅在已有 Direct Play Grant、
 准确 Media/Part 和当前 Plex 授权都成立时返回控制描述。描述包含稳定内容身份、固定同源控制路径
-及独立 bearer；bearer 只进入控制请求头。Gateway 每次通过上游解析服务获取临时 URL 后仍只返回
+及独立 bearer；bearer 只进入控制请求头。媒体服务每次通过上游解析服务获取临时 URL 后仍只返回
 控制描述，媒体字节保持 CDN 直达浏览器。
 
 Chrome `requestId` 将一次 `start.mpd` 的开始和响应关联起来，播放分组只包含 Plex origin、
@@ -435,8 +435,8 @@ Plex session，也不包含 Token。更新的跨 Part 请求会使旧响应失�
 旧页面代次的消息不能复用该句柄。被页面合并的重复建流会立即释放未采用句柄，页面卸载、刷新
 或关闭时会提交当前终态。后台最多保留 64 个未释放句柄，并清理长期未活动绑定。
 
-ShimWeave 与 Gateway 是独立产品。Gateway 可以提供媒体源发现协议，但扩展不得依赖其页面注入、
-播放器实现或媒体中继；没有 Gateway 时，站点适配器仍可通过其他 provider 接入整文件媒体源。
+ShimWeave 与媒体服务是独立产品。媒体服务可以提供媒体源发现协议，但扩展不得依赖其页面注入、
+播放器实现或媒体中继；没有媒体服务时，站点适配器仍可通过其他 provider 接入整文件媒体源。
 
 上述边界必须由回归门禁共同保护：本地正常 MPD、原生 Direct Play、legacy 302、`control-v1`
 分别有独立用例，并验证 provider 与站点适配器互斥。任一接管失败都应证明 Plex 原链路仍可运行；
