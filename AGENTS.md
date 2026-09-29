@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-ShimWeave 是独立的浏览器媒体兼容运行时，Plex 是首个站点适配器；Gateway 的 `control-v1` 是可选媒体源协议，legacy 302 可独立接入。当前支持与限制见 [README](README.md)，架构与后续能力条件见 [架构设计](docs/architecture.md)，性能证据见 [性能基线](docs/performance.md)。当前阶段旁路或尚未实现的路径不等于永久否决后续设计。
+ShimWeave 是独立的浏览器媒体兼容运行时，Plex 是首个站点适配器；媒体服务提供的 `control-v1` 是可选媒体源协议，legacy 302 可独立接入。当前支持与限制见 [README](README.md)，架构与后续能力条件见 [架构设计](docs/architecture.md)，性能证据见 [性能基线](docs/performance.md)。当前阶段旁路或尚未实现的路径不等于永久否决后续设计。
 
 恢复工作时，读取当前任务实际引用的记录及必要设计、证据。没有记录时依据当前上下文继续；新的恢复记录可保存到 `.workbench/records/`。
 
@@ -39,7 +39,7 @@ TypeScript 使用严格模式、两空格缩进和单引号，并通过 Biome �
 
 ## 架构与性能约束
 
-媒体字节从源站/CDN 直达浏览器，Gateway 或 NAS 不充当额外媒体中继，也不使用扩展消息的 Base64 通道。Range 读取校验 `206` 与 `Content-Range`，缓存有界，取消与背压贯穿 Fetch、Worker 和 MSE。核心按媒体事实与实际播放路径的能力证据判断，未知字段保留未知，网络或取消失败不写成格式不支持。
+媒体字节从源站/CDN 直达浏览器，媒体服务或 NAS 不充当额外媒体中继，也不使用扩展消息的 Base64 通道。Range 读取校验 `206` 与 `Content-Range`，缓存有界，取消与背压贯穿 Fetch、Worker 和 MSE。核心按媒体事实与实际播放路径的能力证据判断，未知字段保留未知，网络或取消失败不写成格式不支持。
 
 优先原生播放，其次转封装，再按需转换音频。成熟容器和编解码能力交给可替换引擎，站点语义、调度、缓存和失败策略由项目维护。Plex 接管保留同一个原生 video、控制栏、时间轴和队列；私有 Hook 留在适配器内，接管失败释放资源并恢复原链路。当前本地媒体和原生可播路径旁路，不创建额外 Worker、探测或 Range 请求。
 

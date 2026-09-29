@@ -152,8 +152,8 @@ export interface PlexResponseHeader {
 }
 
 /**
- * Gateway control-v1 用响应头交付稳定控制票据，使原始 Shaka 请求在
- * Gateway 终止，而媒体 Range 只由 ShimWeave 发往 CDN。
+ * 媒体服务的 control-v1 用响应头交付稳定控制票据，使原始 Shaka 请求在
+ * 媒体服务终止，而媒体 Range 只由 ShimWeave 发往 CDN。
  */
 export const parsePlexControlResponse = (
   requestUrl: string,

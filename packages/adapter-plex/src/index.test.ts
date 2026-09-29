@@ -40,7 +40,7 @@ describe('Plex media redirect adapter', () => {
     expect(result && isPlexMediaSourceNotice(result)).toBe(true);
   });
 
-  it('把 Gateway control-v1 响应转成媒体身份和控制能力', () => {
+  it('把媒体服务的 control-v1 响应转成媒体身份和控制能力', () => {
     const result = parsePlexControlResponse(
       'https://plex.example/video/:/transcode/universal/start.mpd?path=%2Flibrary%2Fmetadata%2F109591&mediaIndex=0&partIndex=2&X-Plex-Token=private',
       204,
