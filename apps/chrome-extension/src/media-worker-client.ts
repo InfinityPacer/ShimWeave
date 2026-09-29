@@ -5,6 +5,7 @@ import type {
   SubtitleCue,
   SubtitleUnavailableReason,
 } from '@shimweave/contracts';
+import { randomId } from '@shimweave/contracts';
 import { createExtensionFrameWorker } from './extension-worker-bridge.js';
 import {
   MEDIA_WORKER_PROTOCOL,
@@ -102,7 +103,7 @@ export class MediaWorkerClient {
 
   constructor(options: MediaWorkerClientOptions) {
     validateOptions(options);
-    this.sessionId = options.sessionId ?? crypto.randomUUID();
+    this.sessionId = options.sessionId ?? randomId();
     const createWorker = options.createWorker ?? defaultWorkerFactory;
     this.worker = createWorker(
       options.workerURL ?? chrome.runtime.getURL('media-worker.js'),

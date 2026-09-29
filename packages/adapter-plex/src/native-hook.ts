@@ -1,3 +1,4 @@
+import { randomId } from '@shimweave/contracts';
 import { PLEX_NATIVE_PROTOCOL, type PlexNativeMessage } from './native-protocol.js';
 import { parsePlexStartRequestIdentity } from './request-identity.js';
 
@@ -104,7 +105,7 @@ export class PlexNativeHookController {
 
   constructor(options: PlexNativeHookOptions) {
     this.postMessage = options.postMessage;
-    this.createSessionId = options.createSessionId ?? (() => crypto.randomUUID());
+    this.createSessionId = options.createSessionId ?? randomId;
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancelSchedule = options.cancelSchedule ?? ((handle) => clearTimeout(handle));
     this.rejectionGraceMs = options.rejectionGraceMs ?? DEFAULT_REJECTION_GRACE_MS;

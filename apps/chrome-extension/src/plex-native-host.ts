@@ -12,6 +12,7 @@ import type {
   AudioMediaTrack,
   SubtitleUnavailableReason,
 } from '@shimweave/contracts';
+import { randomId } from '@shimweave/contracts';
 import { MediaWorkerRemoteError } from './media-worker-client.js';
 import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
 import type { PlayerFrameEvent } from './player-frame-protocol.js';
@@ -134,7 +135,7 @@ export class PlexNativePlaybackHost {
 
   constructor(options: PlexNativePlaybackHostOptions) {
     this.options = options;
-    this.createNoticeId = options.createNoticeId ?? (() => crypto.randomUUID());
+    this.createNoticeId = options.createNoticeId ?? randomId;
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancelSchedule = options.cancelSchedule ?? ((handle) => clearTimeout(handle));
     this.sourceTtlMs = options.sourceTtlMs ?? DEFAULT_SOURCE_TTL_MS;

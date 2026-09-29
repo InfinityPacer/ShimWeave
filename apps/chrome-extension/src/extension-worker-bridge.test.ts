@@ -55,7 +55,8 @@ describe('ExtensionFrameWorker', () => {
     const frame = new TestFrame();
     const parent = { append: vi.fn() };
     vi.stubGlobal('ErrorEvent', TestErrorEvent);
-    vi.stubGlobal('crypto', { randomUUID: () => 'bridge_nonce_1234567890' });
+    // 与 http 打开的 Plex Web 相同，只有 getRandomValues，没有 randomUUID。
+    vi.stubGlobal('crypto', { getRandomValues: (array: Uint8Array) => array.fill(0) });
     vi.stubGlobal('document', {
       documentElement: parent,
       body: undefined,
@@ -92,13 +93,13 @@ describe('ExtensionFrameWorker', () => {
         protocol: 'shimweave-extension-worker-v1',
         type: 'connect',
         workerName: 'shimweave-media-session',
-        nonce: 'bridge_nonce_1234567890',
+        nonce: '00000000-0000-4000-8000-000000000000',
       },
       'chrome-extension://extension-id',
       [expect.any(MessagePort)],
     );
     expect(frame.src).toBe(
-      'chrome-extension://extension-id/worker-frame.html#bridge_nonce_1234567890',
+      'chrome-extension://extension-id/worker-frame.html#00000000-0000-4000-8000-000000000000',
     );
     expect(receivedByWorkerFrame).toEqual([{ type: 'worker-message', message: { type: 'init' } }]);
 
@@ -125,7 +126,8 @@ describe('ExtensionFrameWorker', () => {
   it('Frame 尚未就绪时终止会丢弃排队消息且不再建立 Worker', () => {
     const mount = new TestMount();
     const frame = new TestFrame();
-    vi.stubGlobal('crypto', { randomUUID: () => 'bridge_nonce_1234567890' });
+    // 与 http 打开的 Plex Web 相同，只有 getRandomValues，没有 randomUUID。
+    vi.stubGlobal('crypto', { getRandomValues: (array: Uint8Array) => array.fill(0) });
     vi.stubGlobal('document', {
       documentElement: { append: vi.fn() },
       body: undefined,
