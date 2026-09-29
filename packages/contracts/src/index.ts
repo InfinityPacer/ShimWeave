@@ -536,4 +536,5 @@ const isStringRecord = (value: unknown): value is Readonly<Record<string, string
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
+export * from './random-id.js';
 export * from './range-lease.js';

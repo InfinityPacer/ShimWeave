@@ -1,3 +1,5 @@
+import { randomId } from '@shimweave/contracts';
+
 const EXTENSION_WORKER_BRIDGE_PROTOCOL = 'shimweave-extension-worker-v1' as const;
 
 interface WorkerLike {
@@ -33,7 +35,7 @@ export class ExtensionFrameWorker implements WorkerLike {
       throw new ExtensionWorkerUrlUnsupportedError();
     }
 
-    const nonce = crypto.randomUUID();
+    const nonce = randomId();
     const mount = document.createElement('span');
     mount.hidden = true;
     mount.setAttribute('aria-hidden', 'true');
