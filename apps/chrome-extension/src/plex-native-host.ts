@@ -14,6 +14,7 @@ import type {
 } from '@shimweave/contracts';
 import { randomId } from '@shimweave/contracts';
 import { MediaWorkerRemoteError } from './media-worker-client.js';
+import { MseMediaDetachedError } from './mse-controller.js';
 import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
 import type { PlayerFrameEvent } from './player-frame-protocol.js';
 import { PLAYER_FRAME_PROTOCOL } from './player-frame-protocol.js';
@@ -362,6 +363,13 @@ export class PlexNativePlaybackHost {
 
   private async failSession(session: NativePlaybackSession, error: unknown): Promise<void> {
     if (this.active !== session) return;
+    // 用户在 Plex 里结束播放时站点先卸载 video，随后才可能发来 takeover-stop，按正常结束收尾，
+    // 只通知 Hook 释放会话，否则同一媒体再次 load 会复用已结束的接管。
+    if (error instanceof MseMediaDetachedError) {
+      await this.stopActive('detached');
+      this.postTakeoverError(session.sessionId, 'media_detached');
+      return;
+    }
     const failure = presentPlaybackFailure(error);
     const formats = session.descriptor ? formatMediaFormats(session.descriptor) : {};
     const interrupted = session.playback !== undefined;
