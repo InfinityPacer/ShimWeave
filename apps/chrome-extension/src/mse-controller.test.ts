@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { MediaWorkerStream, MediaWorkerStreamChunk } from './media-worker-client.js';
 import {
   MseBufferQuotaExceededError,
+  MseMediaDetachedError,
   MsePlaybackController,
   MseSeekTargetUnavailableError,
   MseTypeUnsupportedError,
@@ -586,6 +587,56 @@ describe('MsePlaybackController', () => {
     await playback.stop();
   });
 
+  it('MSE 配额满且无旧缓冲可淘汰时收窄前向窗口并等播放推进后重试', async () => {
+    const sourceBuffer = new TestSourceBuffer([[[55, 150]], [[55, 140]]]);
+    const mediaSource = new TestMediaSource(sourceBuffer);
+    const mediaElement = new TestMediaElement();
+    const acknowledgements = [vi.fn(), vi.fn()];
+    const stream = createStream(
+      acknowledgements.map((acknowledge, index) => ({
+        bytes: new Uint8Array([index + 1]),
+        acknowledge,
+      })),
+      undefined,
+      { initialPositionSeconds: 60 },
+    );
+    const controller = new MsePlaybackController({
+      mediaElement: mediaElement as unknown as HTMLMediaElement,
+      createMediaSource: () => mediaSource as unknown as MediaSource,
+      createObjectURL: () => 'blob:quota-relief',
+      revokeObjectURL: vi.fn(),
+      isTypeSupported: () => true,
+      maxBufferedAheadSeconds: 120,
+      capacityPollMs: 60_000,
+    });
+
+    const playback = await controller.start(stream);
+    const settled = vi.fn();
+    playback.completion.then(settled, settled);
+    await flush();
+    sourceBuffer.quotaFailures = 1;
+    sourceBuffer.finish();
+    await flush();
+    expect(sourceBuffer.appendAttempts).toBe(2);
+    expect(sourceBuffer.removals).toEqual([]);
+    expect(acknowledgements[1]).not.toHaveBeenCalled();
+
+    mediaElement.currentTime = 70;
+    mediaElement.dispatchEvent(new Event('timeupdate'));
+    await flush();
+    expect(sourceBuffer.appendAttempts).toBe(2);
+
+    mediaElement.currentTime = 80;
+    mediaElement.dispatchEvent(new Event('timeupdate'));
+    await flush();
+    expect(sourceBuffer.appendAttempts).toBe(3);
+    sourceBuffer.finish();
+    await playback.completion;
+    expect(settled).toHaveBeenCalledWith(undefined);
+    expect(acknowledgements.every((acknowledge) => acknowledge.mock.calls.length === 1)).toBe(true);
+    await playback.stop();
+  });
+
   it('没有可淘汰旧缓冲时将 MSE 配额失败显式返回', async () => {
     const sourceBuffer = new TestSourceBuffer();
     sourceBuffer.quotaFailures = 1;
@@ -606,6 +657,55 @@ describe('MsePlaybackController', () => {
     expect(sourceBuffer.appendAttempts).toBe(1);
     expect(cancel).toHaveBeenCalledOnce();
     expect(mediaElement.src).toBe('');
+  });
+
+  it('站点清掉 video src 后的 SourceBuffer 异常归为外部卸载', async () => {
+    const sourceBuffer = new TestSourceBuffer();
+    const mediaSource = new TestMediaSource(sourceBuffer);
+    const mediaElement = new TestMediaElement();
+    const revoke = vi.fn();
+    const cancel = vi.fn(async () => undefined);
+    const secondRead = deferred<void>();
+    let readIndex = 0;
+    const stream: MediaWorkerStream = {
+      mimeType: 'video/mp4',
+      timelineOffsetSeconds: 0,
+      initialPositionSeconds: 0,
+      completion: Promise.resolve(),
+      read: async () => {
+        const index = readIndex++;
+        if (index === 1) await secondRead.promise;
+        if (index >= 2) return undefined;
+        return { bytes: new Uint8Array([index + 1]), acknowledge: vi.fn() };
+      },
+      cancel,
+    };
+    const controller = new MsePlaybackController({
+      mediaElement: mediaElement as unknown as HTMLMediaElement,
+      createMediaSource: () => mediaSource as unknown as MediaSource,
+      createObjectURL: () => 'blob:detached',
+      revokeObjectURL: revoke,
+      isTypeSupported: () => true,
+      maxBufferedAheadSeconds: 200,
+    });
+
+    const playback = await controller.start(stream);
+    await flush();
+    sourceBuffer.finish();
+    await flush();
+    mediaElement.removeAttribute('src');
+    mediaSource.readyState = 'closed';
+    sourceBuffer.appendBuffer = () => {
+      throw new DOMException('removed', 'InvalidStateError');
+    };
+    secondRead.resolve();
+
+    await expect(playback.completion).rejects.toBeInstanceOf(MseMediaDetachedError);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(mediaElement.load).not.toHaveBeenCalled();
+    expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:detached');
+    await playback.stop();
+    expect(revoke).toHaveBeenCalledOnce();
   });
 
   it('快速切换时丢弃旧流迟到的媒体块并只追加新流', async () => {

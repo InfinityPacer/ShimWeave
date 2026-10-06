@@ -7,6 +7,7 @@ import {
 import type { MediaDescriptor, PlaybackPlan } from '@shimweave/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import { MediaWorkerRemoteError } from './media-worker-client.js';
+import { MseMediaDetachedError } from './mse-controller.js';
 import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
 import {
   BrowserMediaElementError,
@@ -716,6 +717,44 @@ describe('PlexNativePlaybackHost', () => {
       'MediaWorkerRemoteError stream_failed RangeProtocolError',
     );
     expect(posted.at(-1)).toMatchObject({ type: 'takeover-error', code: 'media_read_failed' });
+    await host.dispose();
+  });
+
+  it('Plex 结束播放先卸载 video 时静默收尾，不提示中断', async () => {
+    const media = new TestMediaElement();
+    const completion = deferred<void>();
+    const runtimeStop = vi.fn(async () => undefined);
+    const interruptions: string[] = [];
+    const failures: string[] = [];
+    const posted: PlexNativeMessage[] = [];
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({
+        start: async () =>
+          activePlayback(
+            vi.fn(async () => undefined),
+            completion.promise,
+          ),
+        stop: runtimeStop,
+      }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: (message) => posted.push(message),
+      readStartSeconds: () => undefined,
+      presentFailure: (failure) => failures.push(failure.code),
+      presentInterruption: (failure) => interruptions.push(failure.code),
+      createNoticeId: () => 'notice_id_1234567890',
+    });
+    claim(host, 'native_session_1234567890');
+    await flush();
+
+    completion.reject(new MseMediaDetachedError());
+    await flush();
+
+    expect(interruptions).toEqual([]);
+    expect(failures).toEqual([]);
+    expect(runtimeStop).toHaveBeenCalledOnce();
+    expect(media.dataset.shimweaveSessionEnd).toBe('detached');
+    expect(media.dataset.shimweaveSessionEndDetail).toBeUndefined();
+    expect(posted.at(-1)).toMatchObject({ type: 'takeover-error', code: 'media_detached' });
     await host.dispose();
   });
 

@@ -18,6 +18,7 @@ import {
 } from './media-worker-client.js';
 import {
   MseBufferQuotaExceededError,
+  MseMediaDetachedError,
   MsePlaybackController,
   type MsePlaybackSession,
   MsePlaybackStoppedError,
@@ -744,6 +745,7 @@ const classifyPlaybackFailure = (
   }
   if (
     error instanceof MsePlaybackStoppedError ||
+    error instanceof MseMediaDetachedError ||
     error instanceof MediaWorkerStreamCancelledError ||
     (error instanceof DOMException && error.name === 'AbortError')
   ) {

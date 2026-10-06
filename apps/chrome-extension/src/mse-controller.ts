@@ -24,6 +24,8 @@ const DEFAULT_MAX_BUFFERED_BEHIND_SECONDS = 30;
 const DEFAULT_MAX_BUFFERED_BYTES = 128 * 1024 * 1024;
 const DEFAULT_CAPACITY_POLL_MS = 100;
 const MINIMUM_DECODER_HISTORY_SECONDS = 30;
+const MINIMUM_QUOTA_AHEAD_SECONDS = 5;
+const QUOTA_AHEAD_RATIO = 0.8;
 const MEDIA_HAVE_METADATA = 1;
 
 /**
@@ -126,6 +128,8 @@ class ActiveMsePlayback {
   private playbackRequested = false;
   private initialPositionApplied = false;
   private initialPositionBuffered = false;
+  private quotaAheadSeconds = Number.POSITIVE_INFINITY;
+  private objectURLRevoked = false;
   private readonly bufferedBytes = new BufferedByteLedger();
 
   constructor(
@@ -200,10 +204,19 @@ class ActiveMsePlayback {
         this.resolveCompletion();
         return;
       }
+      // 站点自己卸载播放器时会清掉 video 的 src，之后的 SourceBuffer 操作抛出与媒体无关的
+      // InvalidStateError；这属于外部结束而非播放失败，统一归为 MseMediaDetachedError。
+      const detached = this.mediaDetached();
       await this.stream.cancel().catch(() => undefined);
       this.detachMedia();
-      this.rejectCompletion(error);
+      this.rejectCompletion(detached ? new MseMediaDetachedError() : error);
     }
+  }
+
+  private mediaDetached(): boolean {
+    return (
+      this.options.mediaElement.src !== this.objectURL || this.mediaSource.readyState === 'closed'
+    );
   }
 
   private async stopInternal(): Promise<void> {
@@ -247,7 +260,7 @@ class ActiveMsePlayback {
   private timeBudgetExceeded(sourceBuffer: SourceBuffer): boolean {
     return (
       bufferedAhead(sourceBuffer.buffered, this.options.mediaElement.currentTime) >=
-      this.options.maxBufferedAheadSeconds
+      Math.min(this.options.maxBufferedAheadSeconds, this.quotaAheadSeconds)
     );
   }
 
@@ -267,19 +280,39 @@ class ActiveMsePlayback {
         () => sourceBuffer.appendBuffer(bytes),
         this.abortController.signal,
       );
-    try {
-      await append();
-    } catch (error) {
-      if (!isQuotaExceededError(error)) throw error;
-      if (!(await this.evictOldBuffer(sourceBuffer))) {
-        throw new MseBufferQuotaExceededError();
-      }
+    const appendWithinQuota = async (): Promise<boolean> => {
       try {
         await append();
-      } catch (retryError) {
-        if (isQuotaExceededError(retryError)) throw new MseBufferQuotaExceededError();
-        throw retryError;
+        return true;
+      } catch (error) {
+        if (isQuotaExceededError(error)) return false;
+        throw error;
       }
+    };
+    while (!(await appendWithinQuota())) {
+      if ((await this.evictOldBuffer(sourceBuffer)) && (await appendWithinQuota())) return;
+      await this.waitForQuotaRelief(sourceBuffer);
+    }
+  }
+
+  /**
+   * 浏览器按轨限制 SourceBuffer（Chrome 默认音频 12 MB、视频 150 MB），高码率音轨
+   * 会先于时长和字节预算触顶。配额满后把前向窗口收窄到当前前向缓冲的八成，等播放
+   * 消耗出空间再重试同一块；只有前向缓冲已不足以继续播放时才判定失败。
+   */
+  private async waitForQuotaRelief(sourceBuffer: SourceBuffer): Promise<void> {
+    const ahead = bufferedAhead(sourceBuffer.buffered, this.options.mediaElement.currentTime);
+    if (!this.initialPositionApplied || ahead < MINIMUM_QUOTA_AHEAD_SECONDS) {
+      throw new MseBufferQuotaExceededError();
+    }
+    this.quotaAheadSeconds = Math.max(MINIMUM_QUOTA_AHEAD_SECONDS, ahead * QUOTA_AHEAD_RATIO);
+    while (this.timeBudgetExceeded(sourceBuffer)) {
+      await waitForEventOrTimeout(
+        this.options.mediaElement,
+        'timeupdate',
+        this.options.capacityPollMs,
+        this.abortController.signal,
+      );
     }
   }
 
@@ -347,10 +380,13 @@ class ActiveMsePlayback {
   }
 
   private detachMedia(): void {
-    if (this.options.mediaElement.src !== this.objectURL) return;
-    this.options.mediaElement.pause();
-    this.options.mediaElement.removeAttribute('src');
-    this.options.mediaElement.load();
+    if (this.objectURLRevoked) return;
+    this.objectURLRevoked = true;
+    if (this.options.mediaElement.src === this.objectURL) {
+      this.options.mediaElement.pause();
+      this.options.mediaElement.removeAttribute('src');
+      this.options.mediaElement.load();
+    }
     this.options.revokeObjectURL(this.objectURL);
   }
 }
@@ -459,9 +495,17 @@ export class MseSeekTargetUnavailableError extends Error {
   }
 }
 
+/** 媒体元素已被站点或其他代码接走，会话应静默结束而不是向用户报告播放失败。 */
+export class MseMediaDetachedError extends Error {
+  constructor() {
+    super('The media element was detached from this MediaSource');
+    this.name = 'MseMediaDetachedError';
+  }
+}
+
 export class MseBufferQuotaExceededError extends Error {
   constructor() {
-    super('MSE buffer quota remained exhausted after old media was evicted');
+    super('MSE buffer quota cannot hold enough media ahead of playback');
     this.name = 'MseBufferQuotaExceededError';
   }
 }
