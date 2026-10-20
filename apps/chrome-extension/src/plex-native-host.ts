@@ -143,7 +143,7 @@ const failureDetail = (error: unknown): string => {
   return parts
     .join(' ')
     .replace(/[^A-Za-z0-9_.> -]/g, '')
-    .slice(0, 200);
+    .slice(0, 320);
 };
 
 /**

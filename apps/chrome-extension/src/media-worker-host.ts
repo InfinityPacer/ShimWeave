@@ -506,13 +506,19 @@ const safeErrorClassification = (error: unknown): string => {
 const safeErrorName = (name: string): string =>
   /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name) ? name : 'Error';
 
+/** 过长的引擎说明保留首尾，例如复用器错误末尾的实际时间戳，供现场排查。 */
+const MAX_ERROR_DETAIL_EDGE = 80;
+
 const safeErrorDetail = (message: string): string | undefined => {
   const detail = message.trim();
   const boundary = detail.search(/https?:\/\/|[/?&=%]/i);
-  const safePrefix = (boundary >= 0 ? detail.slice(0, boundary) : detail).trim();
+  const fullPrefix = (boundary >= 0 ? detail.slice(0, boundary) : detail).trim();
+  const safePrefix =
+    fullPrefix.length > MAX_ERROR_DETAIL_EDGE * 2
+      ? `${fullPrefix.slice(0, MAX_ERROR_DETAIL_EDGE)} .. ${fullPrefix.slice(-MAX_ERROR_DETAIL_EDGE)}`
+      : fullPrefix;
   if (
     safePrefix.length === 0 ||
-    safePrefix.length > 200 ||
     !/^[\x20-\x7e]+$/.test(safePrefix) ||
     /\b(?:authorization|cookie|secret|signature|signed|token)\b/i.test(safePrefix)
   ) {
