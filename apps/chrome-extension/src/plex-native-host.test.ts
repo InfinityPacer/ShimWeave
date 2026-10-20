@@ -3,9 +3,10 @@ import {
   type PlexMediaSourceNotice,
   type PlexNativeMessage,
   type PlexRequestStartedNotice,
+  type PlexStreamSelection,
 } from '@shimweave/adapter-plex';
 import type { MediaDescriptor, PlaybackPlan } from '@shimweave/contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, type Mock, vi } from 'vitest';
 import { MediaWorkerRemoteError } from './media-worker-client.js';
 import { MseMediaDetachedError } from './mse-controller.js';
 import type { ActiveBrowserPlayback, BrowserPlaybackRequest } from './playback-runtime.js';
@@ -922,3 +923,219 @@ const flush = async (): Promise<void> => {
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
+
+describe('PlexNativePlaybackHost 外挂字幕', () => {
+  const srt =
+    '1\n00:00:01,000 --> 00:00:02,500\n第一句\n\n2\n00:00:03,000 --> 00:00:04,000\n第二句\n';
+  const external = (id: number, codec = 'srt') => ({
+    external: true as const,
+    key: `/library/streams/${id}`,
+    codec,
+    language: 'zh',
+  });
+  const subtitleTracks: MediaDescriptor['tracks'] = [
+    ...descriptor.tracks,
+    { id: 's1', kind: 'subtitle', codec: 'srt' },
+    { id: 's2', kind: 'subtitle', codec: 'srt' },
+  ];
+
+  const setup = (
+    initial: PlexStreamSelection,
+    options: { streamedSubtitle?: string; holdStart?: Promise<void> } = {},
+  ) => {
+    const media = new TestMediaElement();
+    let selection = initial;
+    const renderers: { language: string | undefined; add: Mock; dispose: Mock }[] = [];
+    const setSubtitlesVisible = vi.fn();
+    const playback: ActiveBrowserPlayback = {
+      descriptor: { ...descriptor, tracks: subtitleTracks },
+      plan: {
+        ...plan,
+        ...(options.streamedSubtitle ? { subtitleTrackId: options.streamedSubtitle } : {}),
+      },
+      completion: new Promise<void>(() => undefined),
+      ...(options.streamedSubtitle ? { setSubtitlesVisible } : {}),
+      stop: vi.fn(async () => undefined),
+    };
+    const start = vi.fn(async (request: BrowserPlaybackRequest) => {
+      request.onDescriptor?.(playback.descriptor);
+      await options.holdStart;
+      return playback;
+    });
+    const readSubtitleFile = vi.fn(async (_notice: PlexMediaSourceNotice, _key: string) => srt);
+    const resolveStreamSelection = vi.fn(async () => selection);
+    const presentSubtitleUnavailable = vi.fn();
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({ start, stop: vi.fn(async () => undefined) }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: vi.fn(),
+      readStartSeconds: () => undefined,
+      createNoticeId: () => 'notice_id_1234567890',
+      resolveStreamSelection,
+      readSubtitleFile,
+      presentSubtitleUnavailable,
+      createSidecarRenderer: (_media, language) => {
+        const renderer = { language, add: vi.fn(), dispose: vi.fn() };
+        renderers.push(renderer);
+        return renderer;
+      },
+    });
+    const notice = control('request-1', 'playback-1', 'source-1');
+    host.acceptRuntimeMessage(started('request-1', 'playback-1', 'source-1'));
+    host.acceptRuntimeMessage(notice);
+    host.acceptPageMessage({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-start',
+      requestKey: notice.requestKey,
+      noticeId: 'notice_id_1234567890',
+      sessionId: 'native_session_1234567890',
+    });
+    const change = async (next: PlexStreamSelection) => {
+      selection = next;
+      host.acceptSubtitleChanged();
+      await flush();
+    };
+    const stopTakeover = async () => {
+      host.acceptPageMessage({
+        protocol: PLEX_NATIVE_PROTOCOL,
+        sender: 'main-hook',
+        type: 'takeover-stop',
+        sessionId: 'native_session_1234567890',
+      });
+      await flush();
+    };
+    return {
+      host,
+      start,
+      renderers,
+      readSubtitleFile,
+      resolveStreamSelection,
+      presentSubtitleUnavailable,
+      setSubtitlesVisible,
+      change,
+      stopTakeover,
+    };
+  };
+
+  it('起播时选中的外挂 SRT 由宿主读取文件绘制，媒体运行时不读字幕', async () => {
+    const context = setup({ subtitle: external(20) });
+    await flush();
+
+    expect(context.start.mock.calls[0]?.[0].selectSubtitleTrack).toBeUndefined();
+    expect(context.readSubtitleFile).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ requestKey: 'playback-1' }),
+      '/library/streams/20',
+    );
+    expect(context.renderers).toHaveLength(1);
+    expect(context.renderers[0]?.language).toBe('zh');
+    expect(context.renderers[0]?.add).toHaveBeenCalledWith([
+      { startSeconds: 1, endSeconds: 2.5, text: '第一句' },
+      { startSeconds: 3, endSeconds: 4, text: '第二句' },
+    ]);
+
+    await context.stopTakeover();
+    expect(context.renderers[0]?.dispose).toHaveBeenCalledOnce();
+    await context.host.dispose();
+  });
+
+  it('播放中打开、切换与关闭外挂字幕立即生效，选择没变或读取失败时不动', async () => {
+    const context = setup({});
+    await flush();
+    expect(context.renderers).toHaveLength(0);
+
+    await context.change({ subtitle: external(20) });
+    expect(context.renderers).toHaveLength(1);
+
+    await context.change({ subtitle: external(20) });
+    await context.change({ readFailed: true });
+    expect(context.renderers).toHaveLength(1);
+    expect(context.renderers[0]?.dispose).not.toHaveBeenCalled();
+
+    await context.change({ subtitle: external(21) });
+    expect(context.renderers[0]?.dispose).toHaveBeenCalledOnce();
+    expect(context.readSubtitleFile).toHaveBeenLastCalledWith(
+      expect.anything(),
+      '/library/streams/21',
+    );
+    expect(context.renderers).toHaveLength(2);
+
+    await context.change({});
+    expect(context.renderers[1]?.dispose).toHaveBeenCalledOnce();
+    expect(context.renderers).toHaveLength(2);
+    expect(context.presentSubtitleUnavailable).not.toHaveBeenCalled();
+    await context.host.dispose();
+  });
+
+  it('ASS 等外挂格式提示不可用，不读取文件；文件读不到或没有字幕时同样提示', async () => {
+    const context = setup({ subtitle: external(30, 'ass') });
+    await flush();
+    expect(context.presentSubtitleUnavailable).toHaveBeenCalledExactlyOnceWith(
+      'unsupported_codec',
+      'ass',
+    );
+    expect(context.readSubtitleFile).not.toHaveBeenCalled();
+
+    context.readSubtitleFile.mockResolvedValueOnce(undefined as unknown as string);
+    await context.change({ subtitle: external(20) });
+    context.readSubtitleFile.mockResolvedValueOnce('not subtitles');
+    await context.change({ subtitle: external(21) });
+    expect(context.presentSubtitleUnavailable.mock.calls.slice(1)).toEqual([
+      ['read_failed'],
+      ['read_failed'],
+    ]);
+    expect(context.renderers).toHaveLength(0);
+    await context.host.dispose();
+  });
+
+  it('换走之后才读到的旧字幕文件不再绘制', async () => {
+    const context = setup({});
+    await flush();
+    const slow = deferred<string>();
+    context.readSubtitleFile.mockReturnValueOnce(slow.promise);
+    await context.change({ subtitle: external(20) });
+    await context.change({});
+    slow.resolve(srt);
+    await flush();
+    expect(context.renderers).toHaveLength(0);
+    await context.host.dispose();
+  });
+
+  it('内嵌字幕随开关隐藏与恢复，换到没有在读的内嵌字幕时只撤下旧字幕、不提示', async () => {
+    const context = setup({ subtitle: { ordinal: 0, codec: 'srt' } }, { streamedSubtitle: 's1' });
+    await flush();
+    expect(context.start.mock.calls[0]?.[0].selectSubtitleTrack).toBeDefined();
+
+    await context.change({});
+    expect(context.setSubtitlesVisible).toHaveBeenLastCalledWith(false);
+    await context.change({ subtitle: { ordinal: 0, codec: 'srt' } });
+    expect(context.setSubtitlesVisible).toHaveBeenLastCalledWith(true);
+
+    await context.change({ subtitle: external(20) });
+    expect(context.setSubtitlesVisible).toHaveBeenLastCalledWith(false);
+    expect(context.renderers).toHaveLength(1);
+
+    await context.change({ subtitle: { ordinal: 1, codec: 'srt' } });
+    expect(context.renderers[0]?.dispose).toHaveBeenCalledOnce();
+    expect(context.setSubtitlesVisible).toHaveBeenLastCalledWith(false);
+    await context.change({ subtitle: { ordinal: 5, codec: 'pgs' } });
+    expect(context.setSubtitlesVisible).toHaveBeenLastCalledWith(false);
+    expect(context.presentSubtitleUnavailable).not.toHaveBeenCalled();
+    expect(context.renderers).toHaveLength(1);
+    await context.host.dispose();
+  });
+
+  it('起播完成之前换了字幕，起播后按新选择显示', async () => {
+    const hold = deferred<void>();
+    const context = setup({}, { holdStart: hold.promise });
+    await flush();
+    await context.change({ subtitle: external(20) });
+    expect(context.renderers).toHaveLength(0);
+
+    hold.resolve();
+    await flush();
+    expect(context.resolveStreamSelection).toHaveBeenCalledTimes(2);
+    expect(context.renderers).toHaveLength(1);
+    await context.host.dispose();
+  });
+});

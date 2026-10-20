@@ -166,7 +166,7 @@ export const formatSubtitleUnavailable = (
     const label = codec ? SUBTITLE_CODEC_LABELS[codec.toLowerCase()] : undefined;
     return label ? `字幕没有显示，暂不支持 ${label}` : '字幕没有显示，暂不支持这种字幕格式';
   }
-  if (reason === 'external') return '字幕没有显示，暂不支持外挂字幕';
+  if (reason === 'external') return '字幕没有显示，找不到这条外挂字幕的文件';
   if (reason === 'mismatch' || reason === 'track_not_found') {
     return '字幕没有显示，无法确认所选字幕对应文件里的哪一条';
   }

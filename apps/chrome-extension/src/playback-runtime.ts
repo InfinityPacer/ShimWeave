@@ -58,6 +58,8 @@ export interface ActiveBrowserPlayback {
   readonly descriptor: MediaDescriptor;
   readonly plan: PlaybackPlan;
   readonly completion: Promise<void>;
+  /** 显示或隐藏这次播放的内嵌字幕；没有内嵌字幕时不存在。隐藏期间照常接收 cue。 */
+  readonly setSubtitlesVisible?: (visible: boolean) => void;
   stop(): Promise<void>;
 }
 
@@ -76,6 +78,7 @@ interface MediaWorkerPort {
 interface SubtitleRendererPort {
   reset(): void;
   add(cues: readonly SubtitleCue[]): void;
+  setVisible?(visible: boolean): void;
   dispose(): void;
 }
 
@@ -419,6 +422,11 @@ export class BrowserPlaybackRuntime {
       plan,
       observer,
       release,
+      subtitles?.setVisible
+        ? (visible) => {
+            if (!released) subtitles.setVisible?.(visible);
+          }
+        : undefined,
     );
   }
 
@@ -429,6 +437,7 @@ export class BrowserPlaybackRuntime {
     plan: PlaybackPlan,
     observer: PlaybackEvidenceObserver,
     release: () => Promise<void>,
+    setSubtitlesVisible?: (visible: boolean) => void,
   ): ActivePlaybackState {
     let stopPromise: Promise<void> | undefined;
     const stop = (): Promise<void> => {
@@ -444,6 +453,7 @@ export class BrowserPlaybackRuntime {
       descriptor,
       plan,
       completion: observer.completion,
+      ...(setSubtitlesVisible ? { setSubtitlesVisible } : {}),
       stop,
     };
   }
@@ -649,6 +659,7 @@ const publicPlayback = (state: ActivePlaybackState): ActiveBrowserPlayback => ({
   descriptor: state.descriptor,
   plan: state.plan,
   completion: state.completion,
+  ...(state.setSubtitlesVisible ? { setSubtitlesVisible: state.setSubtitlesVisible } : {}),
   stop: state.stop,
 });
 

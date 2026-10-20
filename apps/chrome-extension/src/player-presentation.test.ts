@@ -147,11 +147,16 @@ describe('字幕不可用提示', () => {
     expect(formatSubtitleUnavailable('unsupported_codec', 'kate')).toBe(
       '字幕没有显示，暂不支持这种字幕格式',
     );
-    expect(formatSubtitleUnavailable('external', 'srt')).toBe('字幕没有显示，暂不支持外挂字幕');
+    expect(formatSubtitleUnavailable('external', 'srt')).toBe(
+      '字幕没有显示，找不到这条外挂字幕的文件',
+    );
     expect(formatSubtitleUnavailable('mismatch')).toBe(
       '字幕没有显示，无法确认所选字幕对应文件里的哪一条',
     );
     expect(formatSubtitleUnavailable('read_failed')).toBe('字幕没有显示，读取字幕失败');
+    expect(formatSubtitleUnavailable('unsupported_codec', 'ass')).toBe(
+      '字幕没有显示，暂不支持 ASS 字幕',
+    );
   });
 
   it('播放中断提示沿用失败说明并附上错误码', () => {

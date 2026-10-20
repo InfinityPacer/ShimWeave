@@ -4,7 +4,10 @@
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
-  "exports": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./subtitle-text": "./dist/subtitle-text.js"
+  },
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -b",
