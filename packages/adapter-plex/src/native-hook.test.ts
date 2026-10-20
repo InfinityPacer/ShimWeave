@@ -297,6 +297,105 @@ describe('PlexNativeHookController', () => {
     hook.dispose();
   });
 
+  it('接管就绪后的读取失败交给 Plex 网络错误表面，不阻断重试', async () => {
+    const fixture = createRuntime(async () => Promise.reject(new Error('manifest rejected')));
+    const posted: PlexNativeMessage[] = [];
+    const hook = new PlexNativeHookController({
+      postMessage: (message) => posted.push(message),
+      rejectionGraceMs: 0,
+    });
+    hook.install(fixture.runtime);
+    const loading = fixture.player.load(startUrl);
+    await flush();
+    hook.accept(sourceAvailable());
+    await flush();
+    const takeover = posted.find((message) => message.type === 'takeover-start');
+    if (takeover?.type !== 'takeover-start') throw new Error('takeover was not started');
+    hook.accept(hostMessage('takeover-ready', takeover.sessionId));
+    await loading;
+
+    hook.accept(takeoverError(takeover.sessionId, 'media_read_failed'));
+    hook.accept(hostMessage('takeover-stopped', takeover.sessionId));
+    await flush();
+
+    expect(fixture.dispatchEvent).toHaveBeenCalledExactlyOnceWith({ type: 'error', network: true });
+    const retry = fixture.player.load(startUrl.replace('playback-1', 'playback-2'));
+    await flush();
+    hook.accept({
+      ...sourceAvailable(),
+      requestKey: requestKey.replace('playback-1', 'playback-2'),
+    });
+    await flush();
+    expect(posted.filter((message) => message.type === 'takeover-start')).toHaveLength(2);
+    retry.catch(() => undefined);
+    hook.dispose();
+  });
+
+  it('接管准备阶段的读取失败同样交给 Plex 网络错误表面', async () => {
+    const manifestError = new Error('manifest rejected');
+    const fixture = createRuntime(async () => Promise.reject(manifestError));
+    const posted: PlexNativeMessage[] = [];
+    const hook = new PlexNativeHookController({
+      postMessage: (message) => posted.push(message),
+      rejectionGraceMs: 0,
+    });
+    hook.install(fixture.runtime);
+    const loading = fixture.player.load(startUrl);
+    await flush();
+    hook.accept(sourceAvailable());
+    await flush();
+    const takeover = posted.find((message) => message.type === 'takeover-start');
+    if (takeover?.type !== 'takeover-start') throw new Error('takeover was not started');
+
+    hook.accept(takeoverError(takeover.sessionId, 'source_expired'));
+    hook.accept(hostMessage('takeover-stopped', takeover.sessionId));
+
+    await expect(loading).rejects.toBe(manifestError);
+    expect(fixture.dispatchEvent).toHaveBeenCalledExactlyOnceWith({ type: 'error', network: true });
+    hook.dispose();
+  });
+
+  it('Plex 卸载画面或失败收尾期间已发起新 load 时不报告网络错误', async () => {
+    const fixture = createRuntime(async () => Promise.reject(new Error('manifest rejected')));
+    const posted: PlexNativeMessage[] = [];
+    const hook = new PlexNativeHookController({
+      postMessage: (message) => posted.push(message),
+      rejectionGraceMs: 0,
+    });
+    hook.install(fixture.runtime);
+    const loading = fixture.player.load(startUrl);
+    await flush();
+    hook.accept(sourceAvailable());
+    await flush();
+    const first = posted.find((message) => message.type === 'takeover-start');
+    if (first?.type !== 'takeover-start') throw new Error('takeover was not started');
+    hook.accept(hostMessage('takeover-ready', first.sessionId));
+    await loading;
+
+    hook.accept(takeoverError(first.sessionId, 'media_detached'));
+    hook.accept(hostMessage('takeover-stopped', first.sessionId));
+    await flush();
+    expect(fixture.dispatchEvent).not.toHaveBeenCalled();
+
+    const next = fixture.player.load(startUrl.replace('playback-1', 'playback-2'));
+    next.catch(() => undefined);
+    await flush();
+    hook.accept({
+      ...sourceAvailable(),
+      requestKey: requestKey.replace('playback-1', 'playback-2'),
+    });
+    await flush();
+    const second = posted.filter((message) => message.type === 'takeover-start').at(1);
+    if (second?.type !== 'takeover-start') throw new Error('second takeover was not started');
+    hook.accept(takeoverError(second.sessionId, 'media_read_failed'));
+    void fixture.player.load(startUrl.replace('playback-1', 'playback-3')).catch(() => undefined);
+    hook.accept(hostMessage('takeover-stopped', second.sessionId));
+    await flush();
+
+    expect(fixture.dispatchEvent).not.toHaveBeenCalled();
+    hook.dispose();
+  });
+
   it('同一 Part 的 Plex 重试复用已经建立的接管会话', async () => {
     const fixture = createRuntime(async () => Promise.reject(new Error('manifest rejected')));
     const posted: PlexNativeMessage[] = [];
@@ -627,6 +726,61 @@ describe('findPlexShakaRuntime', () => {
 
     expect(findPlexShakaRuntime(runtimeRequire)).toEqual({ Player, version: '3.3.1' });
   });
+
+  it('从 Shaka 错误类型构造致命网络错误与媒体错误事件', () => {
+    class Player {
+      async load(_uri: string): Promise<void> {}
+      async unload(): Promise<void> {}
+      getMediaElement(): null {
+        return null;
+      }
+    }
+    class ShakaError {
+      static readonly Severity = { CRITICAL: 2 };
+      static readonly Category = { NETWORK: 1, MEDIA: 3 };
+      static readonly Code = { HTTP_ERROR: 1002, VIDEO_ERROR: 3016 };
+      readonly data: unknown[];
+      constructor(
+        readonly severity: number,
+        readonly category: number,
+        readonly code: number,
+        ...data: unknown[]
+      ) {
+        this.data = data;
+      }
+    }
+    class FakeEvent {
+      readonly detail: unknown;
+      constructor(
+        readonly type: string,
+        data: Map<string, unknown>,
+      ) {
+        this.detail = data.get('detail');
+      }
+    }
+    const exported = {
+      Player,
+      net: { NetworkingEngine: class NetworkingEngine {} },
+      util: { Error: ShakaError, FakeEvent },
+    };
+    const factory = (): void => {
+      void 'shaka.Player';
+      void 'NetworkingEngine';
+      void 'registerScheme';
+    };
+    const runtime = findPlexShakaRuntime(
+      Object.assign(() => exported, { m: { 'arbitrary-module': factory } }),
+    );
+
+    expect(runtime?.createNetworkErrorEvent?.()).toMatchObject({
+      type: 'error',
+      detail: { severity: 2, category: 1, code: 1002, data: [] },
+    });
+    expect(runtime?.createMediaErrorEvent?.(3)).toMatchObject({
+      type: 'error',
+      detail: { severity: 2, category: 3, code: 3016, data: [3] },
+    });
+  });
 });
 
 const createRuntime = (load: () => Promise<void>) => {
@@ -660,6 +814,7 @@ const createRuntime = (load: () => Promise<void>) => {
       Player: Player as unknown as PlexShakaRuntime['Player'],
       version: Player.version,
       createMediaErrorEvent: (mediaErrorCode: number) => ({ type: 'error', mediaErrorCode }),
+      createNetworkErrorEvent: () => ({ type: 'error', network: true }),
     },
   };
 };
@@ -671,6 +826,24 @@ const sourceAvailable = (): Extract<PlexNativeMessage, { type: 'source-available
   requestKey,
   sourceKey,
   noticeId: 'notice_id_1234567890',
+});
+
+const hostMessage = (
+  type: 'takeover-ready' | 'takeover-stopped',
+  sessionId: string,
+): PlexNativeMessage => ({
+  protocol: PLEX_NATIVE_PROTOCOL,
+  sender: 'extension-host',
+  type,
+  sessionId,
+});
+
+const takeoverError = (sessionId: string, code: string): PlexNativeMessage => ({
+  protocol: PLEX_NATIVE_PROTOCOL,
+  sender: 'extension-host',
+  type: 'takeover-error',
+  sessionId,
+  code,
 });
 
 const flush = async (): Promise<void> => {
