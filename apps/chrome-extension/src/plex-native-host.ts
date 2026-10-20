@@ -4,12 +4,16 @@ import {
   type PlexNativeMessage,
   type PlexRequestStartedNotice,
   type PlexStreamSelection,
+  type PlexSubtitleSelection,
+  plexSubtitleSelectionKey,
   resolvePlexAudioTrack,
+  resolvePlexExternalSubtitle,
   resolvePlexSubtitleTrack,
 } from '@shimweave/adapter-plex';
 import type {
   AudioFallbackPolicy,
   AudioMediaTrack,
+  SubtitleCue,
   SubtitleUnavailableReason,
 } from '@shimweave/contracts';
 import { randomId } from '@shimweave/contracts';
@@ -24,6 +28,8 @@ import {
   type PlaybackFailurePresentation,
   presentPlaybackFailure,
 } from './player-presentation.js';
+import { parseSidecarSubtitles } from './sidecar-subtitles.js';
+import { TextTrackSubtitleRenderer } from './subtitle-renderer.js';
 
 interface PlaybackRuntimePort {
   start(request: BrowserPlaybackRequest): Promise<ActiveBrowserPlayback>;
@@ -33,6 +39,11 @@ interface PlaybackRuntimePort {
 interface TimelineReporterPort {
   observe(event: PlayerFrameEvent): void;
   close(): void;
+}
+
+interface SidecarRendererPort {
+  add(cues: readonly SubtitleCue[]): void;
+  dispose(): void;
 }
 
 export interface PlexNativePlaybackHostOptions {
@@ -49,6 +60,15 @@ export interface PlexNativePlaybackHostOptions {
   presentAudioSubstitution?(requested: AudioMediaTrack, playing: AudioMediaTrack): void;
   /** Plex 里选了字幕但无法显示时提示一次，视频照常播放。 */
   presentSubtitleUnavailable?(reason: SubtitleUnavailableReason, codec?: string): void;
+  /**
+   * 读取外挂字幕文件（`/library/streams/{id}`）的文本，由后台带会话凭据读取；
+   * 失败时返回 undefined，页面提示字幕不可用。
+   */
+  readSubtitleFile?(notice: PlexMediaSourceNotice, key: string): Promise<string | undefined>;
+  createSidecarRenderer?(
+    mediaElement: HTMLMediaElement,
+    language: string | undefined,
+  ): SidecarRendererPort;
   /**
    * 接管就绪后播放中断时提示。此时 Plex 的加载早已完成，不会弹出自己的错误框，
    * 不提示的话画面只会停在缓冲状态。
@@ -69,6 +89,15 @@ interface NativePlaybackSession {
   readonly removeMediaListeners: () => void;
   playback?: ActiveBrowserPlayback;
   descriptor?: ActiveBrowserPlayback['descriptor'];
+  /** 当前按哪条 Plex 字幕选择显示，见 plexSubtitleSelectionKey。 */
+  subtitleKey: string;
+  /** 每次改变显示的字幕加一，迟到的外挂字幕读取据此作废。 */
+  subtitleRevision: number;
+  /** 每次重新读取选择加一，只采用最后一次读取的结果。 */
+  selectionReads: number;
+  /** 起播完成之前收到换字幕通知，起播后再读一次选择。 */
+  selectionStale: boolean;
+  sidecar?: SidecarRendererPort;
 }
 
 interface PendingNativeSource {
@@ -84,6 +113,7 @@ interface PendingNativeSource {
 }
 
 const DEFAULT_SOURCE_TTL_MS = 5_000;
+const SIDECAR_TRACK_LABEL = 'ShimWeave sidecar';
 
 /**
  * 会话结束原因写在 video 的 data-shimweave-session-end 上：失败为稳定错误码，
@@ -113,7 +143,7 @@ const failureDetail = (error: unknown): string => {
   return parts
     .join(' ')
     .replace(/[^A-Za-z0-9_.> -]/g, '')
-    .slice(0, 200);
+    .slice(0, 320);
 };
 
 /**
@@ -126,6 +156,9 @@ export class PlexNativePlaybackHost {
   private readonly schedule: NonNullable<PlexNativePlaybackHostOptions['schedule']>;
   private readonly cancelSchedule: NonNullable<PlexNativePlaybackHostOptions['cancelSchedule']>;
   private readonly sourceTtlMs: number;
+  private readonly createSidecarRenderer: NonNullable<
+    PlexNativePlaybackHostOptions['createSidecarRenderer']
+  >;
   private readonly sources = new Map<string, PendingNativeSource>();
   private latestRequestId: string | undefined;
   private latestRequestKey: string | undefined;
@@ -140,6 +173,28 @@ export class PlexNativePlaybackHost {
     this.schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.cancelSchedule = options.cancelSchedule ?? ((handle) => clearTimeout(handle));
     this.sourceTtlMs = options.sourceTtlMs ?? DEFAULT_SOURCE_TTL_MS;
+    this.createSidecarRenderer =
+      options.createSidecarRenderer ??
+      ((mediaElement, language) =>
+        new TextTrackSubtitleRenderer({
+          mediaElement,
+          label: SIDECAR_TRACK_LABEL,
+          ...(language ? { language } : {}),
+        }));
+  }
+
+  /**
+   * Plex Web 在播放器里换了字幕或关掉字幕。接管中的播放不会因此重新起播，这里重新读取
+   * Plex 记下的选择：外挂 SRT 立即换上或撤下，内嵌字幕隐藏或恢复。
+   */
+  acceptSubtitleChanged(): void {
+    const session = this.active;
+    if (this.disposed || !session) return;
+    if (!session.playback) {
+      session.selectionStale = true;
+      return;
+    }
+    void this.refreshSubtitles(session);
   }
 
   acceptRuntimeMessage(message: PlexRequestStartedNotice | PlexMediaSourceNotice): void {
@@ -269,6 +324,10 @@ export class PlexNativePlaybackHost {
       mediaElement,
       ...(reporter ? { reporter } : {}),
       removeMediaListeners: attachTimelineListeners(mediaElement, sessionId, reporter),
+      subtitleKey: 'off',
+      subtitleRevision: 0,
+      selectionReads: 0,
+      selectionStale: false,
     };
     this.active = session;
 
@@ -280,6 +339,10 @@ export class PlexNativePlaybackHost {
           ('strict' as AudioFallbackPolicy),
       ]);
       if (this.active !== session || this.disposed) return;
+      const subtitle = selection.subtitle;
+      // 外挂字幕不在媒体文件里，起播后由宿主读取文件自己绘制，媒体运行时按不选字幕播放。
+      const embeddedSubtitle = subtitle && !isExternalSubtitle(subtitle) ? subtitle : undefined;
+      session.subtitleKey = plexSubtitleSelectionKey(subtitle);
       const playback = await this.getRuntime().start({
         source: notice.source,
         mediaElement,
@@ -291,10 +354,10 @@ export class PlexNativePlaybackHost {
           : {}),
         audioFallback,
         // 未选字幕时字幕保持关闭；选了但对应不上时提示不可用，不猜测其他字幕。
-        ...(selection.subtitle
+        ...(embeddedSubtitle
           ? {
               selectSubtitleTrack: (descriptor) => {
-                const resolved = resolvePlexSubtitleTrack(descriptor.tracks, selection.subtitle);
+                const resolved = resolvePlexSubtitleTrack(descriptor.tracks, embeddedSubtitle);
                 if (resolved.status === 'track') return { trackId: resolved.trackId };
                 if (resolved.status === 'off') return undefined;
                 return {
@@ -331,6 +394,12 @@ export class PlexNativePlaybackHost {
         type: 'takeover-ready',
         sessionId,
       });
+      if (session.selectionStale) {
+        session.selectionStale = false;
+        void this.refreshSubtitles(session);
+      } else if (subtitle && isExternalSubtitle(subtitle)) {
+        void this.showExternalSubtitle(session, subtitle, session.subtitleRevision);
+      }
       void playback.completion.then(
         () => {
           if (this.active === session) markSessionEnd(session, 'ended');
@@ -344,6 +413,71 @@ export class PlexNativePlaybackHost {
       if (this.active !== session) return;
       await this.failSession(session, error);
     }
+  }
+
+  private async refreshSubtitles(session: NativePlaybackSession): Promise<void> {
+    const read = ++session.selectionReads;
+    const selection: PlexStreamSelection = await (
+      this.options.resolveStreamSelection?.(session.notice) ??
+      Promise.resolve<PlexStreamSelection>({ readFailed: true })
+    ).catch((): PlexStreamSelection => ({ readFailed: true }));
+    if (this.active !== session || read !== session.selectionReads || selection.readFailed) {
+      return;
+    }
+    this.applySubtitle(session, selection.subtitle);
+  }
+
+  private applySubtitle(
+    session: NativePlaybackSession,
+    subtitle: PlexSubtitleSelection | undefined,
+  ): void {
+    const key = plexSubtitleSelectionKey(subtitle);
+    if (key === session.subtitleKey) return;
+    session.subtitleKey = key;
+    const revision = ++session.subtitleRevision;
+    session.sidecar?.dispose();
+    delete session.sidecar;
+
+    const embedded = subtitle && !isExternalSubtitle(subtitle) ? subtitle : undefined;
+    const streamingTrackId = session.playback?.plan.subtitleTrackId;
+    const descriptor = session.descriptor;
+    const resolved =
+      embedded && descriptor ? resolvePlexSubtitleTrack(descriptor.tracks, embedded) : undefined;
+    const showsStreamed =
+      resolved?.status === 'track' &&
+      streamingTrackId !== undefined &&
+      resolved.trackId === streamingTrackId;
+    session.playback?.setSubtitlesVisible?.(showsStreamed);
+    // 换到这次没有在读的内嵌字幕时只撤下旧字幕。Plex Web 随后以新选择重新起播会话，
+    // 新的接管按新选择读取内嵌字幕，是否可用也由那次起播提示。
+    if (!subtitle || showsStreamed || embedded) return;
+    void this.showExternalSubtitle(session, subtitle, revision);
+  }
+
+  /** 读取外挂字幕文件并绘制。ASS 等格式与读取失败都只提示不可用，视频照常播放。 */
+  private async showExternalSubtitle(
+    session: NativePlaybackSession,
+    subtitle: PlexSubtitleSelection,
+    revision: number,
+  ): Promise<void> {
+    const current = () => this.active === session && session.subtitleRevision === revision;
+    const resolved = resolvePlexExternalSubtitle(subtitle);
+    if (resolved.status === 'unavailable') {
+      this.options.presentSubtitleUnavailable?.(resolved.reason, resolved.codec);
+      return;
+    }
+    const text = await (
+      this.options.readSubtitleFile?.(session.notice, resolved.key) ?? Promise.resolve(undefined)
+    ).catch(() => undefined);
+    if (!current()) return;
+    const cues = text === undefined ? [] : parseSidecarSubtitles(text, resolved.format);
+    if (cues.length === 0) {
+      this.options.presentSubtitleUnavailable?.('read_failed');
+      return;
+    }
+    const renderer = this.createSidecarRenderer(session.mediaElement, resolved.language);
+    renderer.add(cues);
+    session.sidecar = renderer;
   }
 
   private presentSubstitution(
@@ -390,6 +524,9 @@ export class PlexNativePlaybackHost {
     markSessionEnd(active, reason, error);
     this.active = undefined;
     this.generation += 1;
+    active.subtitleRevision += 1;
+    active.sidecar?.dispose();
+    delete active.sidecar;
     active.removeMediaListeners();
     active.reporter?.close();
     await this.runtime?.stop().catch(() => undefined);
@@ -422,6 +559,9 @@ export class PlexNativePlaybackHost {
     delete source.timeout;
   }
 }
+
+const isExternalSubtitle = (subtitle: PlexSubtitleSelection): boolean =>
+  subtitle.external === true || subtitle.ordinal === undefined;
 
 const attachTimelineListeners = (
   mediaElement: HTMLMediaElement,

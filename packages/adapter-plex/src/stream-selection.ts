@@ -13,11 +13,12 @@ export interface PlexAudioSelection {
 
 /**
  * Plex 为当前用户记住的字幕选择。内嵌字幕带容器流索引，ordinal 是它在 Part 全部内嵌字幕中
- * 按容器顺序的位置；外挂字幕没有索引，只记为 external。
+ * 按容器顺序的位置；外挂字幕没有索引，记为 external，key 是读取字幕文件的 `/library/streams/{id}`。
  */
 export interface PlexSubtitleSelection {
   ordinal?: number;
   external?: boolean;
+  key?: string;
   codec?: string;
   language?: string;
 }
@@ -26,6 +27,8 @@ export interface PlexStreamSelection {
   audio?: PlexAudioSelection;
   /** 缺失表示没有选字幕，播放时字幕保持关闭。 */
   subtitle?: PlexSubtitleSelection;
+  /** 没读到选择。起播按空选择处理；播放中据此不改动正在显示的字幕。 */
+  readFailed?: true;
 }
 
 /** Plex 字幕选择对应到媒体引擎的结果；unavailable 表示选了字幕但不能确定是哪一条。 */
@@ -77,7 +80,14 @@ const parseSubtitleSelection = (
   const subtitles = streams.filter((stream) => stream.streamType === 3);
   const selected = subtitles.find(isSelected);
   if (!selected) return undefined;
-  if (!Number.isSafeInteger(selected.index)) return { external: true, ...streamFacts(selected) };
+  if (!Number.isSafeInteger(selected.index)) {
+    const key = typeof selected.key === 'string' ? selected.key : undefined;
+    return {
+      external: true,
+      ...(key && PLEX_STREAM_KEY.test(key) ? { key } : {}),
+      ...streamFacts(selected),
+    };
+  }
   const embedded = subtitles
     .filter((stream) => Number.isSafeInteger(stream.index))
     .sort((left, right) => Number(left.index) - Number(right.index));
@@ -129,6 +139,76 @@ export const resolvePlexSubtitleTrack = (
     return { status: 'unavailable', reason: 'mismatch', ...codec };
   }
   return { status: 'track', trackId: track.id };
+};
+
+/** 外挂字幕文件的地址只接受这种形状，页面与后台之间不传递任意路径。 */
+export const PLEX_STREAM_KEY = /^\/library\/streams\/\d{1,20}$/;
+
+/** ShimWeave 自己读取并绘制的外挂字幕格式。 */
+export type PlexSidecarSubtitleFormat = 'srt' | 'webvtt';
+
+const PLEX_SIDECAR_FORMATS: Readonly<Record<string, PlexSidecarSubtitleFormat>> = {
+  srt: 'srt',
+  subrip: 'srt',
+  vtt: 'webvtt',
+  webvtt: 'webvtt',
+};
+
+/** 外挂字幕对应到 ShimWeave 的绘制方式；ASS 等格式不能按原样式显示，提示不可用。 */
+export type PlexExternalSubtitleResolution =
+  | { status: 'sidecar'; key: string; format: PlexSidecarSubtitleFormat; language?: string }
+  | { status: 'unavailable'; reason: 'external' | 'unsupported_codec'; codec?: string };
+
+export const resolvePlexExternalSubtitle = (
+  selection: PlexSubtitleSelection,
+): PlexExternalSubtitleResolution => {
+  const codec = selection.codec ? { codec: selection.codec } : {};
+  const format = selection.codec ? PLEX_SIDECAR_FORMATS[selection.codec] : undefined;
+  if (!format) return { status: 'unavailable', reason: 'unsupported_codec', ...codec };
+  if (!selection.key) return { status: 'unavailable', reason: 'external', ...codec };
+  return {
+    status: 'sidecar',
+    key: selection.key,
+    format,
+    ...(selection.language ? { language: selection.language } : {}),
+  };
+};
+
+/** 读取外挂字幕文件的请求，与读取元数据一样只把 Token 放在请求头里。 */
+export const createPlexStreamFileRequest = (
+  context: PlexTimelineContext,
+  key: string,
+): PlexMetadataRequest | undefined => {
+  if (!PLEX_STREAM_KEY.test(key)) return undefined;
+  const url = new URL(key, context.origin);
+  for (const [name, value] of context.clientParameters) url.searchParams.set(name, value);
+  return { url: url.toString(), token: context.token };
+};
+
+/**
+ * Plex Web 在播放器里换字幕时以 `PUT /library/parts/{id}?subtitleStreamID=` 记下新选择，
+ * 关掉字幕时 subtitleStreamID 为 0。这个请求完成后再读元数据，读到的就是新选择。
+ */
+export const isPlexSubtitleSelectionChange = (requestUrl: string): boolean => {
+  try {
+    const url = new URL(requestUrl);
+    return (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      /^\/library\/parts\/\d+$/.test(url.pathname) &&
+      url.searchParams.has('subtitleStreamID')
+    );
+  } catch {
+    return false;
+  }
+};
+
+/** 同一条字幕选择得到同一个标识，用来判断播放中 Plex 里的选择是否变了。 */
+export const plexSubtitleSelectionKey = (selection: PlexSubtitleSelection | undefined): string => {
+  if (!selection) return 'off';
+  if (selection.external || selection.ordinal === undefined) {
+    return `external:${selection.key ?? ''}:${selection.codec ?? ''}`;
+  }
+  return `embedded:${selection.ordinal}:${selection.codec ?? ''}`;
 };
 
 const PLEX_SUBTITLE_CODEC_FAMILIES: Readonly<Record<string, string>> = {

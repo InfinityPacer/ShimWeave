@@ -2,8 +2,12 @@ import type { MediaTrack } from '@shimweave/contracts';
 import { describe, expect, it } from 'vitest';
 import {
   createPlexMetadataRequest,
+  createPlexStreamFileRequest,
+  isPlexSubtitleSelectionChange,
   parsePlexStreamSelection,
+  plexSubtitleSelectionKey,
   resolvePlexAudioTrack,
+  resolvePlexExternalSubtitle,
   resolvePlexSubtitleTrack,
 } from './stream-selection.js';
 
@@ -141,8 +145,85 @@ describe('Plex 字幕选择', () => {
     ]);
     expect(parsePlexStreamSelection(external, 0, 0).subtitle).toEqual({
       external: true,
+      key: '/library/streams/20',
       codec: 'srt',
     });
+  });
+
+  it('外挂字幕的地址只接受字幕文件的形状', () => {
+    const external = (key: unknown) =>
+      part([video, { id: 20, streamType: 3, codec: 'srt', key, selected: true }]);
+    for (const key of ['/library/parts/20', '/library/streams/20?x=1', 'https://other/streams/1']) {
+      expect(parsePlexStreamSelection(external(key), 0, 0).subtitle).toEqual({
+        external: true,
+        codec: 'srt',
+      });
+    }
+  });
+
+  it('外挂 SRT 与 WebVTT 由 ShimWeave 绘制，ASS 等格式提示不可用', () => {
+    expect(
+      resolvePlexExternalSubtitle({
+        external: true,
+        key: '/library/streams/20',
+        codec: 'srt',
+        language: 'zh',
+      }),
+    ).toEqual({ status: 'sidecar', key: '/library/streams/20', format: 'srt', language: 'zh' });
+    expect(
+      resolvePlexExternalSubtitle({ external: true, key: '/library/streams/21', codec: 'vtt' }),
+    ).toEqual({ status: 'sidecar', key: '/library/streams/21', format: 'webvtt' });
+    expect(
+      resolvePlexExternalSubtitle({ external: true, key: '/library/streams/22', codec: 'ass' }),
+    ).toEqual({ status: 'unavailable', reason: 'unsupported_codec', codec: 'ass' });
+    expect(resolvePlexExternalSubtitle({ external: true, codec: 'srt' })).toEqual({
+      status: 'unavailable',
+      reason: 'external',
+      codec: 'srt',
+    });
+  });
+
+  it('选择标识区分关闭、外挂与内嵌字幕', () => {
+    const keys = [
+      plexSubtitleSelectionKey(undefined),
+      plexSubtitleSelectionKey({ external: true, key: '/library/streams/20', codec: 'srt' }),
+      plexSubtitleSelectionKey({ external: true, key: '/library/streams/21', codec: 'srt' }),
+      plexSubtitleSelectionKey({ ordinal: 0, codec: 'srt' }),
+      plexSubtitleSelectionKey({ ordinal: 1, codec: 'srt' }),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(plexSubtitleSelectionKey({ ordinal: 0, codec: 'srt', language: 'en' })).toBe(keys[3]);
+  });
+
+  it('字幕文件请求只在请求头里携带 Token，且只接受字幕文件地址', () => {
+    const context = {
+      origin: 'https://plex.example.test:32400',
+      metadataPath: '/library/metadata/42',
+      ratingKey: '42',
+      token: 'secret-token',
+      clientParameters: [['X-Plex-Client-Identifier', 'client-a']] as const,
+    };
+    const request = createPlexStreamFileRequest(context, '/library/streams/20');
+    expect(request?.url).toBe(
+      'https://plex.example.test:32400/library/streams/20?X-Plex-Client-Identifier=client-a',
+    );
+    expect(request?.url).not.toContain('secret-token');
+    expect(request?.token).toBe('secret-token');
+    expect(createPlexStreamFileRequest(context, '//other.test/library/streams/20')).toBeUndefined();
+    expect(createPlexStreamFileRequest(context, '/library/metadata/42')).toBeUndefined();
+  });
+
+  it('只把记下字幕选择的 Part 请求当作换字幕', () => {
+    const origin = 'https://plex.example.test:32400';
+    expect(isPlexSubtitleSelectionChange(`${origin}/library/parts/7?subtitleStreamID=20`)).toBe(
+      true,
+    );
+    expect(isPlexSubtitleSelectionChange(`${origin}/library/parts/7?subtitleStreamID=0`)).toBe(
+      true,
+    );
+    expect(isPlexSubtitleSelectionChange(`${origin}/library/parts/7?audioStreamID=3`)).toBe(false);
+    expect(isPlexSubtitleSelectionChange(`${origin}/library/parts/7/file.mkv`)).toBe(false);
+    expect(isPlexSubtitleSelectionChange('not a url')).toBe(false);
   });
 
   it('位置与编码都对得上时对应到引擎字幕轨', () => {

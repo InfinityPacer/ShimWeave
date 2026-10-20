@@ -27,6 +27,8 @@ export interface PlexShakaRuntime {
   readonly Player: ShakaPlayerConstructor;
   readonly version: string;
   readonly createMediaErrorEvent?: (mediaErrorCode: number) => ShakaEventLike;
+  /** 构造 Shaka 致命网络错误（HTTP_ERROR），Plex 据此显示 s1002 错误弹窗。 */
+  readonly createNetworkErrorEvent?: () => ShakaEventLike;
 }
 
 interface WebpackRuntimeRequire {
@@ -101,7 +103,10 @@ export class PlexNativeHookController {
   private installedPrototype: ShakaPlayerLike | undefined;
   private originalPrototypeLoad: ShakaPlayerLike['load'] | undefined;
   private createMediaErrorEvent: PlexShakaRuntime['createMediaErrorEvent'];
+  private createNetworkErrorEvent: PlexShakaRuntime['createNetworkErrorEvent'];
   private blockedSource: { readonly sourceKey: string; readonly mediaErrorCode: 3 | 4 } | undefined;
+  /** Plex 发起的媒体 load 计数；失败收尾期间出现新 load 时不再向播放器报告旧错误。 */
+  private loadRequests = 0;
 
   constructor(options: PlexNativeHookOptions) {
     this.postMessage = options.postMessage;
@@ -129,6 +134,7 @@ export class PlexNativeHookController {
     this.installedPrototype = prototype;
     this.originalPrototypeLoad = originalLoad;
     this.createMediaErrorEvent = runtime.createMediaErrorEvent;
+    this.createNetworkErrorEvent = runtime.createNetworkErrorEvent;
     this.postMessage({
       protocol: PLEX_NATIVE_PROTOCOL,
       sender: 'main-hook',
@@ -209,6 +215,7 @@ export class PlexNativeHookController {
     this.sources.clear();
     this.blockedSource = undefined;
     this.createMediaErrorEvent = undefined;
+    this.createNetworkErrorEvent = undefined;
     this.installedPrototype = undefined;
     this.originalPrototypeLoad = undefined;
   }
@@ -220,6 +227,7 @@ export class PlexNativeHookController {
   ): Promise<void> {
     const identity = parsePlexStartRequestIdentity(args[0]);
     if (!identity) return invokeLoad(originalLoad, player, args);
+    this.loadRequests += 1;
     if (this.blockedSource?.sourceKey === identity.sourceKey) {
       return this.rejectBlockedLoad(player, this.blockedSource);
     }
@@ -365,10 +373,17 @@ export class PlexNativeHookController {
     if (mediaErrorCode !== undefined) {
       this.blockedSource = { sourceKey: tracked.sourceKey, mediaErrorCode };
     }
+    const loadRequests = this.loadRequests;
     await this.stopTakeover(tracked, new PlexNativeTakeoverError(code));
-    if (mediaErrorCode === undefined || this.blockedSource?.sourceKey !== tracked.sourceKey) {
+    if (mediaErrorCode === undefined) {
+      // 读取类失败不阻断重试。接管已卸载 Shaka 的媒体数据面，Plex 自己不会再报错，
+      // 不交给它的错误表面就只剩空白画面和无限缓冲。
+      if (PLEX_NETWORK_FAILURE_CODES.has(code) && this.loadRequests === loadRequests) {
+        this.dispatchErrorEvent(tracked.player, this.createNetworkErrorEvent?.());
+      }
       return;
     }
+    if (this.blockedSource?.sourceKey !== tracked.sourceKey) return;
     this.dispatchMediaError(tracked.player, mediaErrorCode);
   }
 
@@ -391,7 +406,13 @@ export class PlexNativeHookController {
     player: ShakaPlayerLike,
     mediaErrorCode: 3 | 4,
   ): ShakaEventLike | undefined {
-    const event = this.createMediaErrorEvent?.(mediaErrorCode);
+    return this.dispatchErrorEvent(player, this.createMediaErrorEvent?.(mediaErrorCode));
+  }
+
+  private dispatchErrorEvent(
+    player: ShakaPlayerLike,
+    event: ShakaEventLike | undefined,
+  ): ShakaEventLike | undefined {
     if (!event) return undefined;
     try {
       player.dispatchEvent(event);
@@ -510,10 +531,12 @@ export const findPlexShakaRuntime = (
     }
     if (!isShakaRuntime(candidate)) continue;
     const createMediaErrorEvent = createShakaMediaErrorEventFactory(candidate);
+    const createNetworkErrorEvent = createShakaNetworkErrorEventFactory(candidate);
     return {
       Player: candidate.Player,
       version: candidate.Player.version ?? 'unknown',
       ...(createMediaErrorEvent ? { createMediaErrorEvent } : {}),
+      ...(createNetworkErrorEvent ? { createNetworkErrorEvent } : {}),
     };
   }
   return undefined;
@@ -522,8 +545,8 @@ export const findPlexShakaRuntime = (
 interface ShakaErrorConstructor {
   new (severity: number, category: number, code: number, ...data: unknown[]): unknown;
   readonly Severity?: { readonly CRITICAL?: number };
-  readonly Category?: { readonly MEDIA?: number };
-  readonly Code?: { readonly VIDEO_ERROR?: number };
+  readonly Category?: { readonly MEDIA?: number; readonly NETWORK?: number };
+  readonly Code?: { readonly VIDEO_ERROR?: number; readonly HTTP_ERROR?: number };
 }
 
 interface ShakaFakeEventConstructor {
@@ -554,6 +577,37 @@ const createShakaMediaErrorEventFactory = (
     return new FakeEvent('error', new Map([['detail', detail]]));
   };
 };
+
+const createShakaNetworkErrorEventFactory = (
+  runtime: Record<string, unknown>,
+): PlexShakaRuntime['createNetworkErrorEvent'] => {
+  const util = runtime.util;
+  if (!isRecord(util)) return undefined;
+  const ErrorType = util.Error as ShakaErrorConstructor | undefined;
+  const FakeEvent = util.FakeEvent as ShakaFakeEventConstructor | undefined;
+  const severity = ErrorType?.Severity?.CRITICAL;
+  const category = ErrorType?.Category?.NETWORK;
+  const code = ErrorType?.Code?.HTTP_ERROR;
+  if (
+    typeof ErrorType !== 'function' ||
+    typeof FakeEvent !== 'function' ||
+    typeof severity !== 'number' ||
+    typeof category !== 'number' ||
+    typeof code !== 'number'
+  ) {
+    return undefined;
+  }
+  return () => {
+    const detail = new ErrorType(severity, category, code);
+    return new FakeEvent('error', new Map([['detail', detail]]));
+  };
+};
+
+/** 宿主报告的读取类失败码，对应 Plex 的 s1002（网络）错误表面。 */
+const PLEX_NETWORK_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'media_read_failed',
+  'source_expired',
+]);
 
 const definitiveMediaErrorCode = (code: string): 3 | 4 | undefined => {
   if (code === 'media_decode_error') return 3;

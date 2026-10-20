@@ -13,8 +13,18 @@ class FakeCue {
 }
 
 class FakeTextTrack {
-  mode: TextTrackMode = 'disabled';
+  readonly modes: TextTrackMode[] = [];
+  private current: TextTrackMode = 'disabled';
   readonly list: FakeCue[] = [];
+
+  get mode(): TextTrackMode {
+    return this.current;
+  }
+
+  set mode(value: TextTrackMode) {
+    this.current = value;
+    this.modes.push(value);
+  }
 
   get cues(): FakeCue[] {
     return [...this.list];
@@ -50,7 +60,7 @@ class FakeDocument {
   }
 }
 
-class FakeMediaElement {
+class FakeMediaElement extends EventTarget {
   readonly ownerDocument = new FakeDocument();
   readonly textTracks = new EventTarget();
   readonly created: { kind: string; label: string; language: string; track: FakeTextTrack }[] = [];
@@ -129,6 +139,59 @@ describe('TextTrackSubtitleRenderer', () => {
     expect(media.created).toHaveLength(1);
     expect(media.created[0]?.track.mode).toBe('showing');
     expect(media.ownerDocument.styles).toHaveLength(1);
+  });
+
+  it('外挂字幕用另一条轨道，隐藏后站点切换轨道也不会被恢复显示', () => {
+    const { media, renderer: embedded } = create();
+    const sidecar = new TextTrackSubtitleRenderer({
+      mediaElement: media as unknown as HTMLMediaElement,
+      label: 'ShimWeave sidecar',
+      createCue: FakeCue as unknown as typeof VTTCue,
+    });
+    embedded.add([{ startSeconds: 1, endSeconds: 2, text: '内嵌' }]);
+    sidecar.add([{ startSeconds: 1, endSeconds: 2, text: '外挂' }]);
+    const [embeddedTrack, sidecarTrack] = media.created.map((created) => created.track);
+    expect(media.created.map((created) => created.label)).toEqual([
+      'ShimWeave',
+      'ShimWeave sidecar',
+    ]);
+    expect(embeddedTrack?.list.map((cue) => cue.text)).toEqual(['内嵌']);
+
+    embedded.setVisible(false);
+    media.textTracks.dispatchEvent(new Event('change'));
+    expect(embeddedTrack?.mode).toBe('hidden');
+    expect(embeddedTrack?.list).toHaveLength(1);
+    expect(sidecarTrack?.mode).toBe('showing');
+
+    sidecar.dispose();
+    expect(media.attributes.has('data-shimweave-subtitles')).toBe(true);
+    embedded.setVisible(true);
+    expect(embeddedTrack?.mode).toBe('showing');
+    embedded.dispose();
+    expect(media.attributes.has('data-shimweave-subtitles')).toBe(false);
+  });
+
+  it('跳转、重建字幕代次或同一 video 再次接管时先隐藏再显示，让浏览器撤下旧字幕', () => {
+    const { media, renderer } = create();
+    const track = media.created[0]?.track;
+    if (!track) throw new Error('track missing');
+    expect(track.modes).toEqual(['hidden', 'showing']);
+
+    media.dispatchEvent(new Event('seeked'));
+    expect(track.modes.slice(2)).toEqual(['hidden', 'showing']);
+    renderer.reset();
+    expect(track.modes.slice(4)).toEqual(['hidden', 'showing']);
+
+    renderer.setVisible(false);
+    media.dispatchEvent(new Event('seeked'));
+    expect(track.mode).toBe('hidden');
+    expect(track.modes).toHaveLength(7);
+
+    renderer.dispose();
+    media.dispatchEvent(new Event('seeked'));
+    expect(track.modes.at(-1)).toBe('disabled');
+    create(media);
+    expect(track.modes.slice(-2)).toEqual(['hidden', 'showing']);
   });
 
   it('站点脚本关闭字幕轨时有限次数地恢复显示', () => {

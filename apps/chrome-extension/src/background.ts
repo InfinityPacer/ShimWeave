@@ -1,4 +1,5 @@
 import {
+  isPlexSubtitleSelectionChange,
   type PlexMediaSourceNotice,
   type PlexRequestStartedNotice,
   parsePlexControlResponse,
@@ -9,8 +10,12 @@ import {
 } from '@shimweave/adapter-plex';
 import {
   fetchPlexStreamSelection,
+  fetchPlexSubtitleFile,
   isPlexStreamSelectionMessage,
+  isPlexSubtitleFileMessage,
+  PLEX_SUBTITLE_CHANGED_MESSAGE,
   type PlexStreamSelectionMessage,
+  type PlexSubtitleFileMessage,
 } from './plex-stream-selection.js';
 import { PlexTimelineDispatcher } from './plex-timeline-dispatcher.js';
 import { isPlexTimelineMessage, PLEX_TIMELINE_RELEASE_MESSAGE } from './plex-timeline-protocol.js';
@@ -127,6 +132,10 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     void handleStreamSelectionMessage(message, sender).then(sendResponse, () => sendResponse({}));
     return true;
   }
+  if (isPlexSubtitleFileMessage(message)) {
+    void handleSubtitleFileMessage(message, sender).then(sendResponse, () => sendResponse({}));
+    return true;
+  }
   if (typeof message !== 'object' || message === null || !('type' in message)) return false;
   if (message.type !== 'shimweave:health') return false;
 
@@ -172,6 +181,17 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.webRequest.onCompleted.addListener(
   (details) => clearRequestState(details.requestId),
   plexStartRequestFilter,
+);
+
+// Plex Web 在播放器里换字幕或关字幕时先记下选择，再重新决策；接管中的播放不会重新起播，
+// 所以由这里通知页面重新读取选择。
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    if (details.method !== 'PUT' || details.statusCode < 200 || details.statusCode >= 300) return;
+    if (!isActivePlexRequest(details) || !isPlexSubtitleSelectionChange(details.url)) return;
+    sendToPlexTab(details.tabId, { type: PLEX_SUBTITLE_CHANGED_MESSAGE });
+  },
+  { urls: ['*://*/library/parts/*'], types: ['xmlhttprequest', 'other'] },
 );
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => clearRequestState(details.requestId),
@@ -245,6 +265,21 @@ const handleStreamSelectionMessage = async (
   });
   if (!context) return {};
   return fetchPlexStreamSelection(context, message.mediaIndex, message.partIndex);
+};
+
+const handleSubtitleFileMessage = async (
+  message: PlexSubtitleFileMessage,
+  sender: chrome.runtime.MessageSender,
+) => {
+  if (!acceptsPlexSender(sender)) return {};
+  await restoreTimelineBinding(message.reportId);
+  const context = timelineDispatcher.context(message.reportId, {
+    tabId: sender.tab?.id,
+    frameId: sender.frameId,
+    pageOrigin: pageOrigin(sender.url),
+  });
+  if (!context) return {};
+  return fetchPlexSubtitleFile(context, message.key);
 };
 
 const activateSiteAdapter = async (
@@ -343,15 +378,15 @@ const restoreTimelineBinding = async (reportId: string): Promise<void> => {
   return task;
 };
 
-const notifyTab = (
-  tabId: number,
-  notice: PlexMediaSourceNotice | PlexRequestStartedNotice,
-): void => {
+const notifyTab = (tabId: number, notice: PlexMediaSourceNotice | PlexRequestStartedNotice): void =>
+  sendToPlexTab(tabId, notice);
+
+const sendToPlexTab = (tabId: number, message: unknown): void => {
   const binding = adapterBindings.get(tabId);
   if (binding?.adapterId !== PLEX_ADAPTER_ID || binding.phase !== 'active' || binding.suspended) {
     return;
   }
-  chrome.tabs.sendMessage(tabId, notice, { documentId: binding.documentId }, () => {
+  chrome.tabs.sendMessage(tabId, message, { documentId: binding.documentId }, () => {
     void chrome.runtime.lastError;
   });
 };

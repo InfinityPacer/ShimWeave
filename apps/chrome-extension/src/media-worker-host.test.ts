@@ -584,6 +584,45 @@ describe('DedicatedMediaWorkerHost', () => {
     await host.close();
   });
 
+  it('过长的引擎错误说明保留首尾回传，不整段丢弃', async () => {
+    const messages: MediaWorkerHostMessage[] = [];
+    const scheduler = new RangeScheduler();
+    const host = new DedicatedMediaWorkerHost({
+      postMessage: (message) => messages.push(message),
+      createScheduler: async () => ({
+        mode: 'local',
+        scheduler,
+        close: () => scheduler.close(),
+      }),
+      mediaEngine: testEngine(() => ({
+        describe: async () => descriptor,
+        startFragmentStream: async () => {
+          throw new Error(
+            'Timestamps cannot be smaller than the largest timestamp of the previous GOP (a GOP begins with a key packet and ends right before the next key packet). Got 2.36s, but largest timestamp is 2.52s.',
+          );
+        },
+        close: async () => undefined,
+      })),
+    });
+    host.receive({
+      protocol: MEDIA_WORKER_PROTOCOL,
+      type: 'init',
+      sessionId: 'session',
+      source: directSource(),
+    });
+    await flush();
+
+    host.receive({ protocol: MEDIA_WORKER_PROTOCOL, type: 'start-stream', requestId: 'failed' });
+    await waitFor(() => messages.some((message) => message.type === 'error'));
+    const error = messages.find((message) => message.type === 'error');
+    expect(error).toMatchObject({ code: 'stream_failed' });
+    const message = error?.type === 'error' ? error.message : '';
+    expect(message).toMatch(/^Error\.Timestamps_cannot_be_smaller_than/);
+    expect(message).toMatch(/Got_2_36s_but_largest_timestamp_is_2_52s$/);
+    expect(message.length).toBeLessThanOrEqual(200);
+    await host.close();
+  });
+
   it('建流期间取消会关闭未就绪输入并在重建后释放流槽位', async () => {
     const messages: MediaWorkerHostMessage[] = [];
     const scheduler = new RangeScheduler();

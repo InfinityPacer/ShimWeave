@@ -413,7 +413,7 @@ describe('BrowserPlaybackRuntime 字幕', () => {
   const setup = (planned: PlaybackPlan, media = new TestMediaElement()) => {
     const worker = new TestWorker();
     worker.describe.mockResolvedValue(subtitleDescriptor);
-    const renderer = { reset: vi.fn(), add: vi.fn(), dispose: vi.fn() };
+    const renderer = { reset: vi.fn(), add: vi.fn(), setVisible: vi.fn(), dispose: vi.fn() };
     const createSubtitleRenderer = vi.fn(() => renderer);
     const stops = [vi.fn(async () => undefined), vi.fn(async () => undefined)];
     const planPlayback = vi.fn(
@@ -489,6 +489,22 @@ describe('BrowserPlaybackRuntime 字幕', () => {
     expect(renderer.dispose).toHaveBeenCalledOnce();
     options(1).onSubtitleCues?.(fresh);
     expect(renderer.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('播放中可以隐藏与恢复内嵌字幕，停止后不再改动渲染器', async () => {
+    const { media, runtime, renderer } = setup(subtitlePlan);
+    const active = await runtime.start({
+      source: directSource('source-a', 'https://cdn.example/media'),
+      mediaElement: media as unknown as HTMLMediaElement,
+      selectSubtitleTrack: () => ({ trackId: 'subtitle-3' }),
+    });
+
+    active.setSubtitlesVisible?.(false);
+    active.setSubtitlesVisible?.(true);
+    expect(renderer.setVisible.mock.calls).toEqual([[false], [true]]);
+    await active.stop();
+    active.setSubtitlesVisible?.(false);
+    expect(renderer.setVisible).toHaveBeenCalledTimes(2);
   });
 
   it('没有选字幕时不创建渲染器，也不请求字幕', async () => {

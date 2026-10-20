@@ -16,7 +16,12 @@ import { formatPlaybackInterrupted, formatSubtitleUnavailable } from './player-p
 import { PlexAudioNotice } from './plex-audio-notice.js';
 import { PlexErrorPresenter } from './plex-error-presenter.js';
 import { PlexNativePlaybackHost } from './plex-native-host.js';
-import { PLEX_STREAM_SELECTION_MESSAGE } from './plex-stream-selection.js';
+import {
+  isPlexSubtitleChangedMessage,
+  PLEX_STREAM_SELECTION_MESSAGE,
+  PLEX_SUBTITLE_FILE_MESSAGE,
+  type PlexSubtitleFileResponse,
+} from './plex-stream-selection.js';
 import {
   PLEX_TIMELINE_RELEASE_MESSAGE,
   type PlexTimelineMessage,
@@ -87,6 +92,7 @@ function startPlexRuntime(): ActivePlexRuntime {
     presentAudioSubstitution: (requested, playing) => audioNotice.show(requested, playing),
     presentSubtitleUnavailable: (reason, codec) =>
       subtitleNotice.showText(formatSubtitleUnavailable(reason, codec), 'subtitle'),
+    readSubtitleFile: requestSubtitleFile,
     presentInterruption: (failure) =>
       interruptionNotice.showText(
         formatPlaybackInterrupted(failure),
@@ -98,6 +104,10 @@ function startPlexRuntime(): ActivePlexRuntime {
   const onRuntimeMessage = (message: unknown): false => {
     if (isSiteAdapterReactivateMessage(message) && message.adapterId === plexAdapterManifest.id) {
       activation.reactivate();
+      return false;
+    }
+    if (isPlexSubtitleChangedMessage(message)) {
+      host.acceptSubtitleChanged();
       return false;
     }
     if (isPlexRequestStartedNotice(message) || isPlexMediaSourceNotice(message)) {
@@ -173,7 +183,7 @@ function requestActivation(): Promise<boolean> {
 
 /** 音轨选择由后台用播放会话凭据读取，页面只拿到位置与编码。 */
 function requestStreamSelection(notice: PlexMediaSourceNotice): Promise<PlexStreamSelection> {
-  if (!notice.playbackReportId) return Promise.resolve({});
+  if (!notice.playbackReportId) return Promise.resolve({ readFailed: true });
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(
       {
@@ -184,10 +194,30 @@ function requestStreamSelection(notice: PlexMediaSourceNotice): Promise<PlexStre
       },
       (response: PlexStreamSelection | undefined) => {
         if (chrome.runtime.lastError) {
-          resolve({});
+          resolve({ readFailed: true });
           return;
         }
-        resolve(response ?? {});
+        resolve(response ?? { readFailed: true });
+      },
+    );
+  });
+}
+
+/** 外挂字幕文件同样由后台用播放会话凭据读取，页面只提交字幕文件地址。 */
+function requestSubtitleFile(
+  notice: PlexMediaSourceNotice,
+  key: string,
+): Promise<string | undefined> {
+  if (!notice.playbackReportId) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: PLEX_SUBTITLE_FILE_MESSAGE, reportId: notice.playbackReportId, key },
+      (response: PlexSubtitleFileResponse | undefined) => {
+        if (chrome.runtime.lastError) {
+          resolve(undefined);
+          return;
+        }
+        resolve(typeof response?.text === 'string' ? response.text : undefined);
       },
     );
   });
