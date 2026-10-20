@@ -179,6 +179,14 @@ Input，健康输入可以保留同一 Range 会话和缓存。不能使用会�
 `QuotaExceededError`，先强制清理安全旧缓冲并只重试一次。仍失败时返回明确错误，不依赖
 浏览器自动回收。
 
+从头播放与 Seek 共用同一条手动分片路径。视频按解码顺序复制原码流，音频按计划复制或由
+`Conversion` 只转换选中的音轨。Mediabunny 的 MP4 复用器按 GOP 从呈现时间推导解码时间，
+要求同一 GOP 内的包不早于上一 GOP 已写出的最大呈现时间。开放 GOP 的随机访问点（HEVC CRA、
+带恢复点的 H.264 I 帧）在解码顺序上后面可能跟着呈现更早的前导图像，引擎在交给复用器前
+按关键帧处理它们。输出起点关键帧的前导图像引用起点之前的图像，无法解码且早于新时间轴零点，
+直接丢弃。中途关键帧的前导图像若早于上一 GOP 已写出的图像，则丢弃该关键帧的全部前导图像，
+编码规范保证非前导图像不引用它们。其余开放 GOP 原样输出，连续播放不丢帧。
+
 媒体读取或解封装失败后，Dedicated Worker 会销毁已进入失败状态的媒体输入并在同一全局
 调度器下重建输入会话。正常播放和 Seek 不走重建路径；重试不会创建额外的跨标签并发池。
 
@@ -213,7 +221,7 @@ AC3、DTS 和 AAC codec 构建为扩展包内独立 chunk。Worker 只有在规�
 TrueHD 不在 Mediabunny 的编码列表里，轨道 codec 为 null，它自己的解码与 Conversion 都会丢弃这条
 轨道。`@shimweave/codec-truehd` 把 FFmpeg 9.0.2 的 `truehd` 解码器编译为约 240 KB 的 WASM（gzip 约
 110 KB），内联在独立 chunk 里，只在选中 TrueHD 且需要转换时加载。引擎按 Matroska CodecID
-`A_TRUEHD` 识别这条轨道，此时从头播放也走手动分片路径：`EncodedPacketSink` 从目标位置前的
+`A_TRUEHD` 识别这条轨道，由手动分片路径驱动：`EncodedPacketSink` 从目标位置前的
 major sync 读包，解码器直接取流内的双声道呈现子流，再由 `AudioSampleSource` 编码为与计划一致
 的 AAC。MKV 包时间戳按毫秒取整，所以只用第一段保留音频定锚，之后按解码帧数推进，视频关键帧
 之前的访问单元丢弃。Atmos 的空间对象子流不解码。

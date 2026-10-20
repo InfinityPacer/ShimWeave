@@ -8,6 +8,7 @@ import {
   AppendOnlyStreamTarget,
   Conversion,
   EncodedAudioPacketSource,
+  type EncodedPacket,
   EncodedPacketSink,
   EncodedVideoPacketSource,
   type Input,
@@ -16,6 +17,7 @@ import {
   Mp4OutputFormat,
   Output,
 } from 'mediabunny';
+import { LeadingPictureFilter } from './leading-pictures.js';
 import { isTrueHdTrack, type PreparedTrueHdAudio, prepareTrueHdAudio } from './truehd-audio.js';
 
 const MAX_TRACK_LEAD_SECONDS = 1;
@@ -26,67 +28,12 @@ export const startMediaFragmentStream = async (
   options: MediaFragmentStreamOptions = {},
 ): Promise<MediaFragmentStream> => {
   validateOptions(options);
-  if ((options.startSeconds ?? 0) > 0) return startSeekRemux(input, sink, options);
-  // Conversion 无法解码 TrueHD，从头播放也走手动分片路径。
-  if (options.outputAudio) {
-    const audioTrack = await selectAudioTrack(input, options.audioTrackId);
-    if (audioTrack && (await isTrueHdTrack(audioTrack)))
-      return startSeekRemux(input, sink, options);
-  }
-  return startConversion(input, sink, options);
+  // 视频统一由手动泵复制编码包：开放 GOP 的前导图像需要在交给复用器前处理，
+  // Conversion 内部的复制路径无法介入。
+  return startPacketRemux(input, sink, options);
 };
 
-const startConversion = async (
-  input: Input,
-  sink: MediaFragmentSink,
-  options: MediaFragmentStreamOptions,
-): Promise<MediaFragmentStream> => {
-  const output = createOutput(sink, options);
-  const conversion = await Conversion.init({
-    input,
-    output,
-    tracks: options.videoTrackId || options.audioTrackId ? 'all' : 'primary',
-    video: options.videoTrackId
-      ? (track) =>
-          String(track.id) === options.videoTrackId ? { forceTranscode: false } : { discard: true }
-      : { forceTranscode: false },
-    audio: options.audioTrackId
-      ? (track) =>
-          String(track.id) === options.audioTrackId
-            ? options.outputAudio
-              ? audioConversionOptions(options.outputAudio)
-              : { forceTranscode: false }
-            : { discard: true }
-      : options.outputAudio
-        ? audioConversionOptions(options.outputAudio)
-        : { forceTranscode: false },
-    showWarnings: false,
-  });
-  if (!conversion.isValid) {
-    await conversion.cancel();
-    throw new MediabunnyConversionUnsupportedError(
-      conversion.discardedTracks.map((item) => item.reason),
-    );
-  }
-
-  const completion = conversion.execute();
-  void completion.catch(() => undefined);
-  try {
-    const mimeType = await output.getMimeType();
-    return {
-      mimeType,
-      timelineOffsetSeconds: 0,
-      initialPositionSeconds: 0,
-      completion,
-      cancel: () => conversion.cancel(),
-    };
-  } catch (error) {
-    await Promise.allSettled([conversion.cancel(), completion]);
-    throw error;
-  }
-};
-
-const startSeekRemux = async (
+const startPacketRemux = async (
   input: Input,
   sink: MediaFragmentSink,
   options: MediaFragmentStreamOptions,
@@ -156,7 +103,7 @@ const startSeekRemux = async (
     }
   } else if (audioTrack && options.outputAudio) {
     try {
-      audioConversion = await createSeekAudioConversion(
+      audioConversion = await createAudioConversion(
         input,
         output,
         audioTrack,
@@ -261,8 +208,8 @@ const startSeekRemux = async (
   }
 };
 
-/** Seek 时只让 Conversion 驱动选中的音频轨，视频继续按关键帧复制原码流。 */
-const createSeekAudioConversion = async (
+/** 只让 Conversion 驱动选中的音频轨，视频继续按关键帧复制原码流。 */
+const createAudioConversion = async (
   input: Input,
   output: Output<Mp4OutputFormat, AppendOnlyStreamTarget>,
   audioTrack: InputAudioTrack,
@@ -401,18 +348,33 @@ const normalizeOutputLanguageCode = (languageCode: string | undefined): string |
 
 const pumpPackets = async (
   trackId: FragmentTrackId,
-  packets: AsyncIterable<import('mediabunny').EncodedPacket>,
+  packets: AsyncIterable<EncodedPacket>,
   source: EncodedVideoPacketSource | EncodedAudioPacketSource,
   timelineOffsetSeconds: number,
   signal: AbortSignal,
   trackBarrier: TrackTimestampBarrier,
 ): Promise<void> => {
+  // 只有视频需要按 GOP 整理前导图像；音频包逐个透传。
+  const leadingPictures =
+    source instanceof EncodedVideoPacketSource
+      ? new LeadingPictureFilter<EncodedPacket>()
+      : undefined;
+  const shift = (packet: EncodedPacket): EncodedPacket =>
+    packet.clone({ timestamp: packet.timestamp - timelineOffsetSeconds });
   try {
     for await (const packet of packets) {
       if (signal.aborted) throw signal.reason;
-      const shifted = packet.clone({ timestamp: packet.timestamp - timelineOffsetSeconds });
+      for (const ready of leadingPictures?.push(packet) ?? [packet]) {
+        const shifted = shift(ready);
+        if (source instanceof EncodedVideoPacketSource) await source.add(shifted);
+        else await source.add(shifted);
+        await trackBarrier.advance(trackId, shifted.timestamp);
+      }
+    }
+    for (const ready of leadingPictures?.flush() ?? []) {
+      if (signal.aborted) throw signal.reason;
+      const shifted = shift(ready);
       if (source instanceof EncodedVideoPacketSource) await source.add(shifted);
-      else await source.add(shifted);
       await trackBarrier.advance(trackId, shifted.timestamp);
     }
   } finally {

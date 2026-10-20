@@ -240,26 +240,47 @@ describe('Mediabunny fragment stream', () => {
     mockState.conversionExecuteOptions.length = 0;
   });
 
-  it('非 Seek 转封装只保留规划器选中的音视频轨道', async () => {
-    await startMediaFragmentStream(input(), sink(), {
-      videoTrackId: '2',
-      audioTrackId: '4',
-      outputAudio,
-    });
+  it('从头播放同样手动复制规划器选中的视频，并只转换选中的音频', async () => {
+    const ignoredKey = packet(0, 'ignored-key');
+    const ignoredVideo = track([ignoredKey], ignoredKey, 3);
+    const selectedKey = packet(0, 'video-key');
+    const selectedVideo = track([selectedKey, packet(0.1, 'video')], selectedKey, 2);
+    const selectedAudio = track([packet(0, 'audio')], undefined, 4);
+    const ignoredAudio = track([packet(0, 'ignored-audio')], undefined, 5);
+    const stream = await startMediaFragmentStream(
+      inputWithTracks([ignoredVideo, selectedVideo], [selectedAudio, ignoredAudio]),
+      sink(),
+      { videoTrackId: '2', audioTrackId: '4', outputAudio },
+    );
 
-    const video = mockState.conversionOptions?.video as (track: { id: number }) => unknown;
-    const audio = mockState.conversionOptions?.audio as (track: { id: number }) => unknown;
-    expect(mockState.conversionOptions?.tracks).toBe('all');
-    expect(video({ id: 2 })).toEqual({ forceTranscode: false });
-    expect(video({ id: 3 })).toEqual({ discard: true });
-    expect(audio({ id: 4 })).toEqual({
+    expect(stream.timelineOffsetSeconds).toBe(0);
+    expect(stream.initialPositionSeconds).toBe(0);
+    expect(ignoredVideo.keyPacketCalls).toHaveLength(0);
+    expect(selectedVideo.keyPacketCalls).toEqual([
+      { startSeconds: 0, options: { verifyKeyPackets: true } },
+    ]);
+    expect(mockState.conversionOptions).toMatchObject({
+      composable: true,
+      tracks: 'all',
+      trim: { start: 0 },
+      video: { discard: true },
+    });
+    const audio = mockState.conversionOptions?.audio as (track: FakeTrack) => unknown;
+    expect(audio(selectedAudio)).toEqual({
       codec: 'aac',
       numberOfChannels: 2,
       sampleRate: 48_000,
       bitrate: 192_000,
       forceTranscode: true,
     });
-    expect(audio({ id: 5 })).toEqual({ discard: true });
+    expect(audio(ignoredAudio)).toEqual({ discard: true });
+
+    await stream.completion;
+    expect(mockState.videoSources[0]?.packets.map((item) => item.label)).toEqual([
+      'video-key',
+      'video',
+    ]);
+    expect(mockState.outputRecords[0]?.finalized).toBe(true);
   });
 
   it('从目标前最近关键帧开始，并保持编码包顺序与重建时间轴', async () => {
