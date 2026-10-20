@@ -23,15 +23,26 @@ const MAX_HELD_LEADING_PICTURES = 64;
  * - 输出起点的关键帧：之前的参考图像不在输出里，前导图像无法正确解码，时间也早于新时间轴零点；
  * - 中途关键帧的前导图像早于已写出图像的最大呈现时间：复用器按 GOP 推导解码时间，无法写入。
  * 编码规范保证非前导图像不引用前导图像，所以丢弃后其余图像仍可正确解码；其余情况原样输出。
+ *
+ * 关键帧本身早于已写出图像时（分段编码拼接处常见：短 GOP 末尾的图像呈现时间晚于下一个 IDR），
+ * 复用器同样会拒绝。此时把它降为普通图像并入当前 GOP：解码顺序和全部图像都保留，
+ * 只少一个随机访问点。
  */
 export class LeadingPictureFilter<T extends OrderedVideoPacket> {
   private maxEmittedTimestamp = Number.NEGATIVE_INFINITY;
   private gop: GopState<T> | undefined;
 
+  /** demote 返回同一编码包的非关键帧副本。 */
+  constructor(private readonly demote: (packet: T) => T) {}
+
   /** 返回本包到达后可以按顺序写出的包；被丢弃或仍需等待的前导图像不返回。 */
   push(packet: T): T[] {
     if (packet.type === 'key' || !this.gop) {
       const released = this.emit(this.decide());
+      if (this.gop && packet.timestamp < this.maxEmittedTimestamp) {
+        released.push(...this.pushInGop(this.gop, this.demote(packet)));
+        return released;
+      }
       this.gop = {
         keyTimestamp: packet.timestamp,
         maxTimestampBeforeKey: this.maxEmittedTimestamp,
@@ -42,8 +53,10 @@ export class LeadingPictureFilter<T extends OrderedVideoPacket> {
       released.push(...this.emit([packet]));
       return released;
     }
+    return this.pushInGop(this.gop, packet);
+  }
 
-    const gop = this.gop;
+  private pushInGop(gop: GopState<T>, packet: T): T[] {
     if (packet.timestamp < gop.keyTimestamp && gop.decision === 'pending') {
       gop.held.push(packet);
       return gop.held.length > MAX_HELD_LEADING_PICTURES ? this.emit(this.decide()) : [];

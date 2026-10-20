@@ -357,7 +357,7 @@ const pumpPackets = async (
   // 只有视频需要按 GOP 整理前导图像；音频包逐个透传。
   const leadingPictures =
     source instanceof EncodedVideoPacketSource
-      ? new LeadingPictureFilter<EncodedPacket>()
+      ? new LeadingPictureFilter<EncodedPacket>((packet) => packet.clone({ type: 'delta' }))
       : undefined;
   const shift = (packet: EncodedPacket): EncodedPacket =>
     packet.clone({ timestamp: packet.timestamp - timelineOffsetSeconds });

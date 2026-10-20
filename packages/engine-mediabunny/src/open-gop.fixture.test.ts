@@ -9,7 +9,9 @@ import { MediabunnyMediaSession } from './media-session.js';
  *   是 CRA，解码顺序上紧跟呈现更早的 RASL；
  * - open-gop-avc.mp4：x264 同样参数加 `b-pyramid=normal`，随机访问点是带恢复点 SEI 的非 IDR I 帧；
  * - crossing-gop-hevc.mkv：由 open-gop-hevc.mkv 经 `setts` 交换第 17 包（上一 GOP 的尾随 P，0.833 秒）
- *   与第 23 包（1 秒 CRA 的 RASL，0.875 秒）的呈现时间，得到前导图像早于上一 GOP 已有图像的排列。
+ *   与第 23 包（1 秒 CRA 的 RASL，0.875 秒）的呈现时间，得到前导图像早于上一 GOP 已有图像的排列；
+ * - late-key-hevc.mkv：同样由 open-gop-hevc.mkv 交换第 17 包（0.833 秒）与第 21 包（1 秒 CRA）的
+ *   呈现时间，关键帧本身早于上一 GOP 已有的 1 秒图像，对应分段编码拼接处的 IDR。
  */
 const fixture = (name: string) => new URL(`./fixtures/${name}`, import.meta.url);
 
@@ -102,5 +104,11 @@ describe('开放 GOP 片源转封装（合成夹具）', () => {
       834, 917, 958,
     ]);
     expect(result.output).toHaveLength(result.source.length - 3);
+  });
+
+  it('关键帧早于上一 GOP 已有图像时保留全部帧继续输出', async () => {
+    const result = await remux('late-key-hevc.mkv');
+
+    expect(result.output).toEqual(result.source);
   });
 });

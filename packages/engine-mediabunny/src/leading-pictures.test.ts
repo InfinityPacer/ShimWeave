@@ -3,10 +3,11 @@ import { LeadingPictureFilter, type OrderedVideoPacket } from './leading-picture
 
 const key = (timestamp: number): OrderedVideoPacket => ({ timestamp, type: 'key' });
 const delta = (timestamp: number): OrderedVideoPacket => ({ timestamp, type: 'delta' });
+const demote = (packet: OrderedVideoPacket): OrderedVideoPacket => ({ ...packet, type: 'delta' });
 
 /** 按解码顺序喂入，返回实际写出的呈现时间。 */
 const run = (packets: readonly OrderedVideoPacket[]): number[] => {
-  const filter = new LeadingPictureFilter<OrderedVideoPacket>();
+  const filter = new LeadingPictureFilter<OrderedVideoPacket>(demote);
   const emitted = packets.flatMap((packet) => filter.push(packet));
   return [...emitted, ...filter.flush()].map((packet) => packet.timestamp);
 };
@@ -56,13 +57,41 @@ describe('LeadingPictureFilter', () => {
     ).toEqual([0, 0.875, 0.75, 1, 1.167]);
   });
 
+  it('关键帧早于已写出的图像时降为普通图像并入当前 GOP，不丢帧', () => {
+    // 分段编码拼接处：IDR 2.204 后的短 GOP 末尾含 2.524，下一个 IDR 却在 2.364。
+    const filter = new LeadingPictureFilter<OrderedVideoPacket>(demote);
+    const packets = [
+      key(2.204),
+      delta(2.524),
+      delta(2.364),
+      delta(2.284),
+      key(2.364),
+      delta(3.004),
+      delta(2.444),
+      delta(2.404),
+      key(3.204),
+    ];
+    const emitted = [...packets.flatMap((packet) => filter.push(packet)), ...filter.flush()];
+    expect(emitted.map((packet) => [packet.timestamp, packet.type])).toEqual([
+      [2.204, 'key'],
+      [2.524, 'delta'],
+      [2.364, 'delta'],
+      [2.284, 'delta'],
+      [2.364, 'delta'],
+      [3.004, 'delta'],
+      [2.444, 'delta'],
+      [2.404, 'delta'],
+      [3.204, 'key'],
+    ]);
+  });
+
   it('输入在前导图像中结束时按同一规则释放', () => {
     expect(run([key(0), delta(0.5), key(1), delta(0.9)])).toEqual([0, 0.5, 1, 0.9]);
     expect(run([key(1), delta(0.9)])).toEqual([1]);
   });
 
   it('前导图像超过等待上限时直接裁决，不无界积压', () => {
-    const filter = new LeadingPictureFilter<OrderedVideoPacket>();
+    const filter = new LeadingPictureFilter<OrderedVideoPacket>(demote);
     filter.push(key(0));
     filter.push(delta(0.01));
     filter.push(key(100));
