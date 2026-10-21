@@ -57,6 +57,90 @@ describe('外挂字幕文件解析', () => {
     ]);
   });
 
+  it('SRT 台词中的空行之后仍属于上一句，时间不合法的块连同续行一起跳过', () => {
+    const srt = [
+      '1',
+      '00:00:01,000 --> 00:00:02,000',
+      '第一行',
+      '',
+      '空行之后',
+      '',
+      '2',
+      '00:00:03,000 --> 00:00:02,000',
+      '倒序',
+      '',
+      '倒序的续行',
+      '',
+      '3',
+      '00:00:04,000 --> 00:00:05,000',
+      '第三句',
+    ].join('\n');
+
+    expect(parseSidecarSubtitles(srt, 'srt')).toEqual([
+      { startSeconds: 1, endSeconds: 2, text: '第一行\n空行之后' },
+      { startSeconds: 4, endSeconds: 5, text: '第三句' },
+    ]);
+  });
+
+  it('SRT 句与句之间隔着多个空行（含 CRLF 与空白行）时仍逐句解析，末尾孤立的序号不并入', () => {
+    const srt = [
+      '',
+      '1',
+      '00:00:01,000 --> 00:00:02,000',
+      '第一句',
+      '',
+      '',
+      '2',
+      '00:00:03,000 --> 00:00:04,000',
+      '第二句',
+      '  ',
+      '',
+      '',
+      '3',
+      '00:00:05,000 --> 00:00:06,000',
+      '第三句',
+      '',
+      '续行',
+      '',
+      '',
+      '4',
+      '',
+    ].join('\r\n');
+
+    expect(parseSidecarSubtitles(srt, 'srt')).toEqual([
+      { startSeconds: 1, endSeconds: 2, text: '第一句' },
+      { startSeconds: 3, endSeconds: 4, text: '第二句' },
+      { startSeconds: 5, endSeconds: 6, text: '第三句\n续行' },
+    ]);
+  });
+
+  it('WebVTT cue 之后的 NOTE、STYLE、REGION 块不并入台词', () => {
+    const vtt = [
+      'WEBVTT',
+      '',
+      'REGION',
+      'id:bottom width:40%',
+      '',
+      '00:00:01.000 --> 00:00:02.000',
+      '第一句',
+      '',
+      'NOTE 中途注释',
+      '',
+      'STYLE',
+      '::cue { color: red }',
+      '',
+      '00:00:03.000 --> 00:00:04.000',
+      '第二句',
+      '',
+      'NOTE 结尾注释',
+    ].join('\n');
+
+    expect(parseSidecarSubtitles(vtt, 'webvtt')).toEqual([
+      { startSeconds: 1, endSeconds: 2, text: '第一句' },
+      { startSeconds: 3, endSeconds: 4, text: '第二句' },
+    ]);
+  });
+
   it('不是字幕的文本得到空列表', () => {
     expect(parseSidecarSubtitles('not subtitles', 'srt')).toEqual([]);
     expect(parseSidecarSubtitles('', 'webvtt')).toEqual([]);
