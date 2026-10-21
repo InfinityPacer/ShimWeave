@@ -62,9 +62,12 @@ export interface PlexNativePlaybackHostOptions {
   presentSubtitleUnavailable?(reason: SubtitleUnavailableReason, codec?: string): void;
   /**
    * 读取外挂字幕文件（`/library/streams/{id}`）的文本，由后台带会话凭据读取；
-   * 失败时返回 undefined，页面提示字幕不可用。
+   * 失败时返回 undefined，读到了却无法解码时返回不可用原因，页面都提示字幕不可用。
    */
-  readSubtitleFile?(notice: PlexMediaSourceNotice, key: string): Promise<string | undefined>;
+  readSubtitleFile?(
+    notice: PlexMediaSourceNotice,
+    key: string,
+  ): Promise<SubtitleFileRead | undefined>;
   createSidecarRenderer?(
     mediaElement: HTMLMediaElement,
     language: string | undefined,
@@ -79,6 +82,9 @@ export interface PlexNativePlaybackHostOptions {
   cancelSchedule?: (handle: ReturnType<typeof setTimeout>) => void;
   sourceTtlMs?: number;
 }
+
+/** 外挂字幕文件的读取结果：文本，或读到了文件但无法解码的原因。 */
+export type SubtitleFileRead = string | { readonly unavailable: 'unsupported_encoding' };
 
 interface NativePlaybackSession {
   readonly generation: number;
@@ -479,11 +485,15 @@ export class PlexNativePlaybackHost {
       this.options.presentSubtitleUnavailable?.(resolved.reason, resolved.codec);
       return;
     }
-    const text = await (
+    const read = await (
       this.options.readSubtitleFile?.(session.notice, resolved.key) ?? Promise.resolve(undefined)
     ).catch(() => undefined);
     if (!current()) return;
-    const cues = text === undefined ? [] : parseSidecarSubtitles(text, resolved.format);
+    if (typeof read === 'object') {
+      this.options.presentSubtitleUnavailable?.(read.unavailable);
+      return;
+    }
+    const cues = read === undefined ? [] : parseSidecarSubtitles(read, resolved.format);
     if (cues.length === 0) {
       this.options.presentSubtitleUnavailable?.('read_failed');
       return;

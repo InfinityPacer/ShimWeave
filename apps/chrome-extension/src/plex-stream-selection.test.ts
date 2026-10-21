@@ -96,7 +96,7 @@ describe('Plex 外挂字幕文件', () => {
     expect(isPlexSubtitleFileMessage({ ...valid, reportId: 'short' })).toBe(false);
   });
 
-  it('用请求头携带 Token 读取，按 UTF-8 解码', async () => {
+  it('要求 Plex 转成 UTF-8，用请求头携带 Token 读取，按 UTF-8 解码', async () => {
     const srt = '1\n00:00:01,000 --> 00:00:02,000\n你好\n';
     const fetcher = vi.fn(async () => new Response(new TextEncoder().encode(srt), { status: 200 }));
 
@@ -104,9 +104,42 @@ describe('Plex 外挂字幕文件', () => {
       await fetchPlexSubtitleFile(context, '/library/streams/20', fetcher as typeof fetch),
     ).toEqual({ text: srt });
     const [url, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('https://plex.example.test:32400/library/streams/20');
+    expect(url).toBe('https://plex.example.test:32400/library/streams/20?encoding=utf-8');
     expect(init.headers).toMatchObject({ 'X-Plex-Token': 'secret-token' });
     expect(init.credentials).toBe('omit');
+  });
+
+  it('Plex 没能转换的 GBK、Big5 字幕按编码不受支持返回，零星坏字节的 UTF-8 照常解码', async () => {
+    const read = async (bytes: readonly number[]) =>
+      fetchPlexSubtitleFile(
+        context,
+        '/library/streams/20',
+        vi.fn(async () => new Response(Uint8Array.from(bytes), { status: 200 })),
+      );
+    const ascii = (text: string) => Array.from(new TextEncoder().encode(text));
+    const cue = (index: number, text: string) =>
+      ascii(`${index}\n00:00:01,000 --> 00:00:02,000\n${text}\n\n`);
+
+    // 「你好世界」的 GBK 与 Big5 字节。
+    const gbk = [...cue(1, ''), 0xc4, 0xe3, 0xba, 0xc3, 0xca, 0xc0, 0xbd, 0xe7, 0x0a];
+    const big5 = [...cue(1, ''), 0xa7, 0x41, 0xa6, 0x6e, 0xa5, 0x40, 0xac, 0xc9, 0x0a];
+    expect(await read(gbk)).toEqual({ unreadable: true });
+    expect(await read(big5)).toEqual({ unreadable: true });
+
+    // 两百句英文里只有一句是 GBK 的「中文」：替换字符不到全文的 0.1%，仍按编码不受支持返回。
+    const english = Array.from({ length: 200 }, (_, i) => cue(i + 1, `line ${i + 1}`)).flat();
+    expect(await read([...english, ...cue(201, ''), 0xd6, 0xd0, 0xce, 0xc4, 0x0a])).toEqual({
+      unreadable: true,
+    });
+
+    // 只有一句的小文件里一个坏字节，替换字符占全文约 3%，照常显示。
+    const tiny = await read([...cue(1, 'hi'), 0xff, 0x0a]);
+    expect(tiny.text).toContain('hi');
+    // 中文 UTF-8 字幕里夹着几个坏字节，替换字符只占非 ASCII 字符的一小部分，照常显示。
+    const chinese = Array.from({ length: 9 }, (_, i) => cue(i + 1, `第 ${i + 1} 句你好`)).flat();
+    const stray = await read([...chinese, 0xff, 0xfe, 0xff, 0xfe, 0xff, 0x0a]);
+    expect(stray.text).toContain('第 9 句你好');
+    expect(stray.unreadable).toBeUndefined();
   });
 
   it('失败、地址不对或超出大小上限时返回空应答', async () => {

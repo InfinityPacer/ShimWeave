@@ -174,7 +174,11 @@ export const resolvePlexExternalSubtitle = (
   };
 };
 
-/** 读取外挂字幕文件的请求，与读取元数据一样只把 Token 放在请求头里。 */
+/**
+ * 读取外挂字幕文件的请求，与读取元数据一样只把 Token 放在请求头里。
+ * 带 `encoding=utf-8` 时 Plex Media Server 自己探测文件编码并转成 UTF-8，不带时按磁盘上的
+ * 字节原样给出；GBK、Big5 等编码的字幕因此不依赖前面是否有 Cirvel 这样的反代转码。
+ */
 export const createPlexStreamFileRequest = (
   context: PlexTimelineContext,
   key: string,
@@ -182,6 +186,7 @@ export const createPlexStreamFileRequest = (
   if (!PLEX_STREAM_KEY.test(key)) return undefined;
   const url = new URL(key, context.origin);
   for (const [name, value] of context.clientParameters) url.searchParams.set(name, value);
+  url.searchParams.set('encoding', 'utf-8');
   return { url: url.toString(), token: context.token };
 };
 

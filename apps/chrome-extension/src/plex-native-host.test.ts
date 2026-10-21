@@ -15,7 +15,7 @@ import {
   BrowserPlaybackProbeRequiredError,
   BrowserPlaybackUnsupportedError,
 } from './playback-runtime.js';
-import { PlexNativePlaybackHost } from './plex-native-host.js';
+import { PlexNativePlaybackHost, type SubtitleFileRead } from './plex-native-host.js';
 
 const descriptor: MediaDescriptor = {
   sourceId: 'source-a',
@@ -1006,7 +1006,10 @@ describe('PlexNativePlaybackHost 外挂字幕', () => {
       await options.holdStart;
       return playback;
     });
-    const readSubtitleFile = vi.fn(async (_notice: PlexMediaSourceNotice, _key: string) => srt);
+    const readSubtitleFile = vi.fn(
+      async (_notice: PlexMediaSourceNotice, _key: string): Promise<SubtitleFileRead | undefined> =>
+        srt,
+    );
     const resolveStreamSelection = vi.fn(async () => selection);
     const presentSubtitleUnavailable = vi.fn();
     const host = new PlexNativePlaybackHost({
@@ -1120,13 +1123,16 @@ describe('PlexNativePlaybackHost 外挂字幕', () => {
     );
     expect(context.readSubtitleFile).not.toHaveBeenCalled();
 
-    context.readSubtitleFile.mockResolvedValueOnce(undefined as unknown as string);
+    context.readSubtitleFile.mockResolvedValueOnce(undefined);
     await context.change({ subtitle: external(20) });
     context.readSubtitleFile.mockResolvedValueOnce('not subtitles');
     await context.change({ subtitle: external(21) });
+    context.readSubtitleFile.mockResolvedValueOnce({ unavailable: 'unsupported_encoding' });
+    await context.change({ subtitle: external(22) });
     expect(context.presentSubtitleUnavailable.mock.calls.slice(1)).toEqual([
       ['read_failed'],
       ['read_failed'],
+      ['unsupported_encoding'],
     ]);
     expect(context.renderers).toHaveLength(0);
     await context.host.dispose();

@@ -15,7 +15,7 @@ import { BrowserPlaybackRuntime } from './playback-runtime.js';
 import { formatPlaybackInterrupted, formatSubtitleUnavailable } from './player-presentation.js';
 import { PlexAudioNotice } from './plex-audio-notice.js';
 import { PlexErrorPresenter } from './plex-error-presenter.js';
-import { PlexNativePlaybackHost } from './plex-native-host.js';
+import { PlexNativePlaybackHost, type SubtitleFileRead } from './plex-native-host.js';
 import {
   isPlexSubtitleChangedMessage,
   PLEX_STREAM_SELECTION_MESSAGE,
@@ -207,7 +207,7 @@ function requestStreamSelection(notice: PlexMediaSourceNotice): Promise<PlexStre
 function requestSubtitleFile(
   notice: PlexMediaSourceNotice,
   key: string,
-): Promise<string | undefined> {
+): Promise<SubtitleFileRead | undefined> {
   if (!notice.playbackReportId) return Promise.resolve(undefined);
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(
@@ -215,6 +215,10 @@ function requestSubtitleFile(
       (response: PlexSubtitleFileResponse | undefined) => {
         if (chrome.runtime.lastError) {
           resolve(undefined);
+          return;
+        }
+        if (response?.unreadable === true) {
+          resolve({ unavailable: 'unsupported_encoding' });
           return;
         }
         resolve(typeof response?.text === 'string' ? response.text : undefined);
