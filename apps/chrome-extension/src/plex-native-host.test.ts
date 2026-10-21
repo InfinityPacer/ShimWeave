@@ -683,10 +683,11 @@ describe('PlexNativePlaybackHost', () => {
     });
     await host.dispose();
   });
-  it('接管就绪后播放中断时提示用户，并在 video 上记下结束原因', async () => {
+  it('接管就绪后的失败交给了 Plex 错误框时不叠加中断提示，并在 video 上记下结束原因', async () => {
     const media = new TestMediaElement();
     const completion = deferred<void>();
     const interruptions: string[] = [];
+    const failures: string[] = [];
     const posted: PlexNativeMessage[] = [];
     const host = new PlexNativePlaybackHost({
       createPlaybackRuntime: () => ({
@@ -700,6 +701,7 @@ describe('PlexNativePlaybackHost', () => {
       resolveMediaElement: () => media as unknown as HTMLMediaElement,
       postMessage: (message) => posted.push(message),
       readStartSeconds: () => undefined,
+      presentFailure: (failure) => failures.push(failure.code),
       presentInterruption: (failure) => interruptions.push(failure.code),
       createNoticeId: () => 'notice_id_1234567890',
     });
@@ -712,12 +714,54 @@ describe('PlexNativePlaybackHost', () => {
     completion.reject(new MediaWorkerRemoteError('stream_failed', 'RangeProtocolError'));
     await flush();
 
-    expect(interruptions).toEqual(['media_read_failed']);
+    expect(failures).toEqual(['media_read_failed']);
+    expect(interruptions).toEqual([]);
     expect(media.dataset.shimweaveSessionEnd).toBe('media_read_failed');
     expect(media.dataset.shimweaveSessionEndDetail).toBe(
       'MediaWorkerRemoteError stream_failed RangeProtocolError',
     );
     expect(posted.at(-1)).toMatchObject({ type: 'takeover-error', code: 'media_read_failed' });
+    await host.dispose();
+  });
+
+  it('Hook 回报就绪后的失败没能交给 Plex 时提示一次中断', async () => {
+    const media = new TestMediaElement();
+    const completion = deferred<void>();
+    const interruptions: string[] = [];
+    const host = new PlexNativePlaybackHost({
+      createPlaybackRuntime: () => ({
+        start: async () =>
+          activePlayback(
+            vi.fn(async () => undefined),
+            completion.promise,
+          ),
+        stop: vi.fn(async () => undefined),
+      }),
+      resolveMediaElement: () => media as unknown as HTMLMediaElement,
+      postMessage: vi.fn(),
+      readStartSeconds: () => undefined,
+      presentInterruption: (failure) => interruptions.push(failure.code),
+      createNoticeId: () => 'notice_id_1234567890',
+    });
+    claim(host, 'native_session_1234567890');
+    await flush();
+
+    completion.reject(new MediaWorkerRemoteError('stream_failed', 'RangeProtocolError'));
+    await flush();
+    const unsurfaced = (sessionId: string, code: string): PlexNativeMessage => ({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-error-unsurfaced',
+      sessionId,
+      code,
+    });
+    host.acceptPageMessage(unsurfaced('other_session_1234567890', 'media_read_failed'));
+    host.acceptPageMessage(unsurfaced('native_session_1234567890', 'playback_failed'));
+    expect(interruptions).toEqual([]);
+
+    host.acceptPageMessage(unsurfaced('native_session_1234567890', 'media_read_failed'));
+    host.acceptPageMessage(unsurfaced('native_session_1234567890', 'media_read_failed'));
+    expect(interruptions).toEqual(['media_read_failed']);
     await host.dispose();
   });
 

@@ -386,12 +386,16 @@ MSE 和状态回写句柄，再通过当前 Shaka Player 的原生错误事件�
 网络、取消或配额错误写成永久格式结论。
 
 ready 之后的其他失败（读取、Worker、缓冲等）不会自然进入 Plex 错误弹窗。接管已经卸载 Shaka 的
-媒体数据面，Plex 只会停在缓冲状态，video 也没有可用媒体，因此扩展在画面上方显示一次中断提示，
-沿用失败说明并附上稳定错误码。读取类失败（`media_read_failed`、`source_expired`）无论发生在
-ready 之前还是之后，Hook 都在会话释放后通过当前 Shaka Player 派发一次致命网络错误
-（`HTTP_ERROR`），让 Plex 显示自己的 s1002 错误弹窗。这类失败不写入同媒体阻断，
-用户重试时仍会重新接管。释放期间 Plex 已发起新的 load（例如切集或用户关闭）时不再派发，
-`media_detached` 等停止原因也不派发。原 Plex 链路本身无法播放这些 STRM 源，所以不在失败后
+媒体数据面，Plex 只会停在缓冲状态，video 也没有可用媒体。读取类失败（`media_read_failed`、
+`source_expired`）无论发生在 ready 之前还是之后，Hook 都在会话释放后通过当前 Shaka Player
+派发一次致命网络错误（`HTTP_ERROR`），让 Plex 显示自己的 s1002 错误弹窗。这类失败不写入同媒体
+阻断，用户重试时仍会重新接管。释放期间 Plex 已发起新的 load（例如切集或用户关闭）时不再派发，
+`media_detached` 等停止原因也不派发。
+
+每次失败只提示一次。ready 之后的失败由 Hook 判断 Plex 的播放器是否真的收到了错误事件，没收到时
+（失败类别没有对应的 Plex 错误表面、当前 Shaka 构造不出错误事件或派发抛错）回报
+`takeover-error-unsurfaced`，宿主这时才在画面上方显示中断提示，沿用失败说明并附上稳定错误码。
+交给了 Plex 的失败只由它的弹窗呈现，Plex 已发起新 load 时两边都不提示。原 Plex 链路本身无法播放这些 STRM 源，所以不在失败后
 重新调用 Plex 的原始 load。每次会话结束时，video 的
 `data-shimweave-session-end` 记下结束原因（失败为错误码，Hook 或新接管停止为 `stopped`，
 播完为 `ended`），失败时 `data-shimweave-session-end-detail` 另记错误名与 Worker 已脱敏的

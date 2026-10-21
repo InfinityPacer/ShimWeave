@@ -373,18 +373,32 @@ export class PlexNativeHookController {
     if (mediaErrorCode !== undefined) {
       this.blockedSource = { sourceKey: tracked.sourceKey, mediaErrorCode };
     }
+    const takeover = tracked.takeover;
     const loadRequests = this.loadRequests;
     await this.stopTakeover(tracked, new PlexNativeTakeoverError(code));
-    if (mediaErrorCode === undefined) {
+    // 收尾期间 Plex 已发起新 load 时它已经离开这次播放，不再报告旧错误。
+    if (this.loadRequests !== loadRequests) return;
+    let surfaced = false;
+    if (mediaErrorCode !== undefined) {
+      if (this.blockedSource?.sourceKey !== tracked.sourceKey) return;
+      surfaced = this.dispatchErrorEvent(
+        tracked.player,
+        this.createMediaErrorEvent?.(mediaErrorCode),
+      );
+    } else if (PLEX_NETWORK_FAILURE_CODES.has(code)) {
       // 读取类失败不阻断重试。接管已卸载 Shaka 的媒体数据面，Plex 自己不会再报错，
       // 不交给它的错误表面就只剩空白画面和无限缓冲。
-      if (PLEX_NETWORK_FAILURE_CODES.has(code) && this.loadRequests === loadRequests) {
-        this.dispatchErrorEvent(tracked.player, this.createNetworkErrorEvent?.());
-      }
-      return;
+      surfaced = this.dispatchErrorEvent(tracked.player, this.createNetworkErrorEvent?.());
     }
-    if (this.blockedSource?.sourceKey !== tracked.sourceKey) return;
-    this.dispatchMediaError(tracked.player, mediaErrorCode);
+    // 就绪前的失败随 load 的拒绝交给 Plex；就绪后 Plex 没有收到错误事件时由宿主自己提示。
+    if (!takeover?.ready || surfaced || code === 'media_detached') return;
+    this.postMessage({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-error-unsurfaced',
+      sessionId: takeover.sessionId,
+      code,
+    });
   }
 
   private rejectBlockedLoad(
@@ -397,29 +411,22 @@ export class PlexNativeHookController {
       type: 'blocked-source-retry',
       sourceKey: blocked.sourceKey,
     });
-    const event = this.dispatchMediaError(player, blocked.mediaErrorCode);
+    const event = this.createMediaErrorEvent?.(blocked.mediaErrorCode);
+    this.dispatchErrorEvent(player, event);
     const code = blocked.mediaErrorCode === 3 ? 'media_decode_error' : 'media_format_error';
     return Promise.reject(event?.detail ?? new PlexNativeTakeoverError(code));
   }
 
-  private dispatchMediaError(
-    player: ShakaPlayerLike,
-    mediaErrorCode: 3 | 4,
-  ): ShakaEventLike | undefined {
-    return this.dispatchErrorEvent(player, this.createMediaErrorEvent?.(mediaErrorCode));
-  }
-
-  private dispatchErrorEvent(
-    player: ShakaPlayerLike,
-    event: ShakaEventLike | undefined,
-  ): ShakaEventLike | undefined {
-    if (!event) return undefined;
+  /** 返回 Plex 的播放器是否收到了错误事件。 */
+  private dispatchErrorEvent(player: ShakaPlayerLike, event: ShakaEventLike | undefined): boolean {
+    if (!event) return false;
     try {
       player.dispatchEvent(event);
+      return true;
     } catch {
       // Shaka 错误桥属于失败收口路径，页面实现变化不得反向破坏会话释放。
+      return false;
     }
-    return event;
   }
 
   private async stopActive(): Promise<void> {

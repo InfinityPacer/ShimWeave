@@ -60,6 +60,14 @@ export type PlexNativeMessage =
       code: string;
     }
   | {
+      /** 就绪后的接管失败没能交给 Plex 的错误表面，由宿主自己提示中断。 */
+      protocol: typeof PLEX_NATIVE_PROTOCOL;
+      sender: 'main-hook';
+      type: 'takeover-error-unsurfaced';
+      sessionId: string;
+      code: string;
+    }
+  | {
       protocol: typeof PLEX_NATIVE_PROTOCOL;
       sender: 'main-hook';
       type: 'takeover-stop';
@@ -132,6 +140,14 @@ export const isPlexNativeMessage = (value: unknown): value is PlexNativeMessage 
   if (value.type === 'takeover-error') {
     return (
       value.sender === 'extension-host' &&
+      opaqueId(value.sessionId) &&
+      nonEmptyString(value.code) &&
+      exactKeys(value, [...BASE_KEYS, 'sessionId', 'code'])
+    );
+  }
+  if (value.type === 'takeover-error-unsurfaced') {
+    return (
+      value.sender === 'main-hook' &&
       opaqueId(value.sessionId) &&
       nonEmptyString(value.code) &&
       exactKeys(value, [...BASE_KEYS, 'sessionId', 'code'])
