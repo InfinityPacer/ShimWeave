@@ -62,16 +62,19 @@ export interface PlexNativePlaybackHostOptions {
   presentSubtitleUnavailable?(reason: SubtitleUnavailableReason, codec?: string): void;
   /**
    * 读取外挂字幕文件（`/library/streams/{id}`）的文本，由后台带会话凭据读取；
-   * 失败时返回 undefined，页面提示字幕不可用。
+   * 失败时返回 undefined，读到了却无法解码时返回不可用原因，页面都提示字幕不可用。
    */
-  readSubtitleFile?(notice: PlexMediaSourceNotice, key: string): Promise<string | undefined>;
+  readSubtitleFile?(
+    notice: PlexMediaSourceNotice,
+    key: string,
+  ): Promise<SubtitleFileRead | undefined>;
   createSidecarRenderer?(
     mediaElement: HTMLMediaElement,
     language: string | undefined,
   ): SidecarRendererPort;
   /**
-   * 接管就绪后播放中断时提示。此时 Plex 的加载早已完成，不会弹出自己的错误框，
-   * 不提示的话画面只会停在缓冲状态。
+   * 接管就绪后播放中断、且 Hook 报告没能交给 Plex 错误弹窗时提示。交给了 Plex 的失败
+   * 由它的弹窗呈现，这里不再重复；没交给的话 Plex 自己不会报错，画面只会停在缓冲状态。
    */
   presentInterruption?(failure: PlaybackFailurePresentation): void;
   createNoticeId?: () => string;
@@ -79,6 +82,9 @@ export interface PlexNativePlaybackHostOptions {
   cancelSchedule?: (handle: ReturnType<typeof setTimeout>) => void;
   sourceTtlMs?: number;
 }
+
+/** 外挂字幕文件的读取结果：文本，或读到了文件但无法解码的原因。 */
+export type SubtitleFileRead = string | { readonly unavailable: 'unsupported_encoding' };
 
 interface NativePlaybackSession {
   readonly generation: number;
@@ -166,6 +172,10 @@ export class PlexNativePlaybackHost {
   private active: NativePlaybackSession | undefined;
   private generation = 0;
   private disposed = false;
+  /** 就绪后失败的会话，等 Hook 回报是否交给了 Plex 再决定要不要提示中断。 */
+  private interruption:
+    | { readonly sessionId: string; readonly failure: PlaybackFailurePresentation }
+    | undefined;
 
   constructor(options: PlexNativePlaybackHostOptions) {
     this.options = options;
@@ -259,6 +269,14 @@ export class PlexNativePlaybackHost {
       if (source?.noticeId === message.noticeId) this.releaseSource(message.requestKey, source);
       return;
     }
+    if (message.type === 'takeover-error-unsurfaced') {
+      const interruption = this.interruption;
+      if (interruption?.sessionId !== message.sessionId) return;
+      if (interruption.failure.code !== message.code) return;
+      this.interruption = undefined;
+      this.options.presentInterruption?.(interruption.failure);
+      return;
+    }
     if (message.type === 'takeover-stop') {
       void this.stopSession(message.sessionId).finally(() => {
         this.options.postMessage({
@@ -274,6 +292,7 @@ export class PlexNativePlaybackHost {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.interruption = undefined;
     this.generation += 1;
     for (const [requestKey, source] of this.sources) this.releaseSource(requestKey, source);
     this.sources.clear();
@@ -466,11 +485,15 @@ export class PlexNativePlaybackHost {
       this.options.presentSubtitleUnavailable?.(resolved.reason, resolved.codec);
       return;
     }
-    const text = await (
+    const read = await (
       this.options.readSubtitleFile?.(session.notice, resolved.key) ?? Promise.resolve(undefined)
     ).catch(() => undefined);
     if (!current()) return;
-    const cues = text === undefined ? [] : parseSidecarSubtitles(text, resolved.format);
+    if (typeof read === 'object') {
+      this.options.presentSubtitleUnavailable?.(read.unavailable);
+      return;
+    }
+    const cues = read === undefined ? [] : parseSidecarSubtitles(read, resolved.format);
     if (cues.length === 0) {
       this.options.presentSubtitleUnavailable?.('read_failed');
       return;
@@ -509,7 +532,7 @@ export class PlexNativePlaybackHost {
     const interrupted = session.playback !== undefined;
     await this.stopActive(failure.code, error);
     this.options.presentFailure?.(failure, formats);
-    if (interrupted) this.options.presentInterruption?.(failure);
+    this.interruption = interrupted ? { sessionId: session.sessionId, failure } : undefined;
     this.postTakeoverError(session.sessionId, failure.code);
   }
 

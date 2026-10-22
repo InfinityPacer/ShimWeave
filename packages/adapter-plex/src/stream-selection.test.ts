@@ -205,7 +205,7 @@ describe('Plex 字幕选择', () => {
     };
     const request = createPlexStreamFileRequest(context, '/library/streams/20');
     expect(request?.url).toBe(
-      'https://plex.example.test:32400/library/streams/20?X-Plex-Client-Identifier=client-a',
+      'https://plex.example.test:32400/library/streams/20?X-Plex-Client-Identifier=client-a&encoding=utf-8',
     );
     expect(request?.url).not.toContain('secret-token');
     expect(request?.token).toBe('secret-token');

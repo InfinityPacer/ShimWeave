@@ -32,6 +32,24 @@ describe('Plex native bridge protocol', () => {
       isPlexNativeMessage({
         protocol: PLEX_NATIVE_PROTOCOL,
         sender: 'main-hook',
+        type: 'takeover-error-unsurfaced',
+        sessionId: 'native_session_1234567890',
+        code: 'media_read_failed',
+      }),
+    ).toBe(true);
+    expect(
+      isPlexNativeMessage({
+        protocol: PLEX_NATIVE_PROTOCOL,
+        sender: 'extension-host',
+        type: 'takeover-error-unsurfaced',
+        sessionId: 'native_session_1234567890',
+        code: 'media_read_failed',
+      }),
+    ).toBe(false);
+    expect(
+      isPlexNativeMessage({
+        protocol: PLEX_NATIVE_PROTOCOL,
+        sender: 'main-hook',
         type: 'takeover-start',
         requestKey: 'plex:source:playback',
         sessionId: 'native_session_1234567890',

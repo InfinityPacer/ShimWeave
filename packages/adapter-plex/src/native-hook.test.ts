@@ -233,6 +233,7 @@ describe('PlexNativeHookController', () => {
     await flush();
 
     expect(fixture.dispatchEvent).toHaveBeenCalledWith({ type: 'error', mediaErrorCode: 3 });
+    expect(posted.some((message) => message.type === 'takeover-error-unsurfaced')).toBe(false);
     const retryUrl = startUrl.replace('playback-1', 'playback-2');
     await expect(fixture.player.load(retryUrl)).rejects.toBeInstanceOf(Error);
     expect(fixture.originalLoad).toHaveBeenCalledOnce();
@@ -284,6 +285,13 @@ describe('PlexNativeHookController', () => {
     await flush();
 
     expect(fixture.dispatchEvent).not.toHaveBeenCalled();
+    expect(posted).toContainEqual({
+      protocol: PLEX_NATIVE_PROTOCOL,
+      sender: 'main-hook',
+      type: 'takeover-error-unsurfaced',
+      sessionId: takeover.sessionId,
+      code: 'media_worker_remote_error',
+    });
     const retryUrl = startUrl.replace('playback-1', 'playback-2');
     const retry = fixture.player.load(retryUrl);
     await flush();
@@ -319,6 +327,7 @@ describe('PlexNativeHookController', () => {
     await flush();
 
     expect(fixture.dispatchEvent).toHaveBeenCalledExactlyOnceWith({ type: 'error', network: true });
+    expect(posted.some((message) => message.type === 'takeover-error-unsurfaced')).toBe(false);
     const retry = fixture.player.load(startUrl.replace('playback-1', 'playback-2'));
     await flush();
     hook.accept({
@@ -393,7 +402,54 @@ describe('PlexNativeHookController', () => {
     await flush();
 
     expect(fixture.dispatchEvent).not.toHaveBeenCalled();
+    expect(posted.some((message) => message.type === 'takeover-error-unsurfaced')).toBe(false);
     hook.dispose();
+  });
+
+  it('就绪后的错误没能交给 Plex 时请宿主自己提示', async () => {
+    for (const [code, failing] of [
+      ['media_read_failed', 'missing'],
+      ['media_decode_error', 'missing'],
+      ['source_expired', 'throws'],
+    ] as const) {
+      const fixture = createRuntime(async () => Promise.reject(new Error('manifest rejected')));
+      if (failing === 'throws') {
+        fixture.dispatchEvent.mockImplementation(() => {
+          throw new Error('page changed');
+        });
+      }
+      const runtime: PlexShakaRuntime =
+        failing === 'missing'
+          ? { Player: fixture.runtime.Player, version: fixture.runtime.version }
+          : fixture.runtime;
+      const posted: PlexNativeMessage[] = [];
+      const hook = new PlexNativeHookController({
+        postMessage: (message) => posted.push(message),
+        rejectionGraceMs: 0,
+      });
+      hook.install(runtime);
+      const loading = fixture.player.load(startUrl);
+      await flush();
+      hook.accept(sourceAvailable());
+      await flush();
+      const takeover = posted.find((message) => message.type === 'takeover-start');
+      if (takeover?.type !== 'takeover-start') throw new Error('takeover was not started');
+      hook.accept(hostMessage('takeover-ready', takeover.sessionId));
+      await loading;
+
+      hook.accept(takeoverError(takeover.sessionId, code));
+      hook.accept(hostMessage('takeover-stopped', takeover.sessionId));
+      await flush();
+
+      expect(posted.at(-1)).toEqual({
+        protocol: PLEX_NATIVE_PROTOCOL,
+        sender: 'main-hook',
+        type: 'takeover-error-unsurfaced',
+        sessionId: takeover.sessionId,
+        code,
+      });
+      hook.dispose();
+    }
   });
 
   it('同一 Part 的 Plex 重试复用已经建立的接管会话', async () => {

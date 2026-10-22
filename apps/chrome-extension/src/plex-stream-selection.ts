@@ -73,8 +73,10 @@ export interface PlexSubtitleFileMessage {
 }
 
 export interface PlexSubtitleFileResponse {
-  /** 读取失败、超时或超出大小上限时缺失。 */
+  /** 读取失败、超时、超出大小上限或文本无法按 UTF-8 读出时缺失。 */
   text?: string;
+  /** 读到了文件，但内容不是 UTF-8，Plex 也没能转换，页面提示编码不受支持。 */
+  unreadable?: true;
 }
 
 export const isPlexSubtitleFileMessage = (value: unknown): value is PlexSubtitleFileMessage => {
@@ -100,8 +102,18 @@ export const isPlexSubtitleChangedMessage = (
 export const PLEX_SUBTITLE_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
- * 读取外挂字幕文件的文本。Cirvel 已把字幕统一转为 UTF-8，这里按 UTF-8 解码；
- * 失败时返回空应答，页面提示字幕不可用，视频照常播放。
+ * 判定文本不是 UTF-8 的替换字符门槛：至少这么多个，且占全部非 ASCII 字符的这一比例以上。
+ * GBK、Big5 按 UTF-8 解码时九成以上的非 ASCII 字符是替换字符，即使字幕大多是英文、只夹几个
+ * 汉字也能认出；合法 UTF-8 里零星的坏字节只占非 ASCII 字符的一小部分，小文件里一两个坏字节
+ * 也达不到个数门槛，照常显示。
+ */
+const MIN_REPLACEMENTS = 4;
+const MIN_REPLACEMENT_SHARE = 0.5;
+
+/**
+ * 读取外挂字幕文件的文本。请求要求 Plex 转成 UTF-8（见 createPlexStreamFileRequest），
+ * 这里按 UTF-8 解码；Plex 认不出编码时原样给出字节，解码结果大量是替换字符，按编码
+ * 不受支持返回，不显示乱码。读取失败时返回空应答，页面提示字幕不可用，视频照常播放。
  */
 export const fetchPlexSubtitleFile = async (
   context: PlexTimelineContext,
@@ -126,12 +138,24 @@ export const fetchPlexSubtitleFile = async (
     if (Number.isFinite(declared) && declared > PLEX_SUBTITLE_FILE_MAX_BYTES) return {};
     const bytes = await response.arrayBuffer();
     if (bytes.byteLength > PLEX_SUBTITLE_FILE_MAX_BYTES) return {};
-    return { text: new TextDecoder('utf-8').decode(bytes) };
+    const text = new TextDecoder('utf-8').decode(bytes);
+    return isMostlyReplacement(text) ? { unreadable: true } : { text };
   } catch {
     return {};
   } finally {
     clearTimeout(timeout);
   }
+};
+
+const isMostlyReplacement = (text: string): boolean => {
+  let replacements = 0;
+  let nonAscii = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code > 0x7f) nonAscii += 1;
+    if (code === 0xfffd) replacements += 1;
+  }
+  return replacements >= MIN_REPLACEMENTS && replacements >= nonAscii * MIN_REPLACEMENT_SHARE;
 };
 
 const nonNegativeInteger = (value: unknown): value is number =>
