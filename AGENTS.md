@@ -48,3 +48,5 @@ TypeScript 使用严格模式、两空格缩进和单引号，并通过 Biome �
 提交使用 Conventional Commits，例如 `feat: add range scheduler`。PR 应说明用户影响、涉及的架构边界和验证结果；可见界面变化附截图，性能路径附测量结果。README 面向用户，架构细节进入 `docs/`。CHANGELOG 面向用户说明可见能力与限制，不堆砌内部类名或实现步骤。禁止提交真实媒体地址、Token、Cookie、私有域名或未脱敏抓包。
 
 发布版本必须同步 `VERSION`、根包、扩展包和 Manifest，并在中文 CHANGELOG 中增加同版本日期节。正式测试、打包、Tag 和 GitHub Release 由 CI 完成。
+
+每个 PR 合并前的评审档位、动手前是否做前提评审以及许可评审角度，按 Tidewren 工作区说明（仓库父目录的 `AGENTS.md`）的 Review Depth 一节执行，并在 PR 里写明所选档位与理由。
