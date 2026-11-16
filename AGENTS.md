@@ -2,7 +2,7 @@
 
 ShimWeave 是独立的浏览器媒体兼容运行时，Plex 是首个站点适配器；媒体服务提供的 `control-v1` 是可选媒体源协议，legacy 302 可独立接入。当前支持与限制见 [README](README.md)，架构与后续能力条件见 [架构设计](docs/architecture.md)，性能证据见 [性能基线](docs/performance.md)。当前阶段旁路或尚未实现的路径不等于永久否决后续设计。
 
-恢复工作时，读取当前任务实际引用的记录及必要设计、证据。没有记录时依据当前上下文继续；新的恢复记录可保存到 `.workbench/records/`。
+恢复工作时，读取当前任务实际引用的记录及必要设计、证据。没有记录时依据当前上下文继续；新的恢复记录放在 `.workbench/projects/shimweave/tasks/`。
 
 ## 项目结构与职责
 
